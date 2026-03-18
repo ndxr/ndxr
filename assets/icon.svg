@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="1024" height="1024" shape-rendering="crispEdges">
+  <rect width="32" height="32" fill="#1D1D1F"/>
+  <style>rect.p { fill: #E8590C; }</style>
+  <!-- N -->
+  <rect class="p" x="9" y="9" width="2" height="2"/>
+  <rect class="p" x="21" y="9" width="2" height="2"/>
+  <rect class="p" x="9" y="12" width="2" height="2"/>
+  <rect class="p" x="12" y="12" width="2" height="2"/>
+  <rect class="p" x="21" y="12" width="2" height="2"/>
+  <rect class="p" x="9" y="15" width="2" height="2"/>
+  <rect class="p" x="15" y="15" width="2" height="2"/>
+  <rect class="p" x="21" y="15" width="2" height="2"/>
+  <rect class="p" x="9" y="18" width="2" height="2"/>
+  <rect class="p" x="18" y="18" width="2" height="2"/>
+  <rect class="p" x="21" y="18" width="2" height="2"/>
+  <rect class="p" x="9" y="21" width="2" height="2"/>
+  <rect class="p" x="21" y="21" width="2" height="2"/>
+</svg>

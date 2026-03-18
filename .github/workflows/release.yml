@@ -1,0 +1,179 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test
+
+  build-linux:
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            archive: linux-amd64
+          - target: aarch64-unknown-linux-musl
+            archive: linux-arm64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build release binary
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Create archive
+        env:
+          TARGET: ${{ matrix.target }}
+          ARCHIVE_NAME: ${{ matrix.archive }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          tar czf "ndxr-${TAG}-${ARCHIVE_NAME}.tar.gz" \
+            -C "target/${TARGET}/release" ndxr \
+            -C "${GITHUB_WORKSPACE}" LICENSE README.md
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ndxr-${{ matrix.archive }}
+          path: ndxr-*-${{ matrix.archive }}.tar.gz
+
+  build-macos:
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            archive: darwin-amd64
+          - target: aarch64-apple-darwin
+            archive: darwin-arm64
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Create archive
+        env:
+          TARGET: ${{ matrix.target }}
+          ARCHIVE_NAME: ${{ matrix.archive }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          tar czf "ndxr-${TAG}-${ARCHIVE_NAME}.tar.gz" \
+            -C "target/${TARGET}/release" ndxr \
+            -C "${GITHUB_WORKSPACE}" LICENSE README.md
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ndxr-${{ matrix.archive }}
+          path: ndxr-*-${{ matrix.archive }}.tar.gz
+
+  build-windows:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build release binary
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Create archive
+        env:
+          TAG: ${{ github.ref_name }}
+        shell: pwsh
+        run: |
+          $staging = "ndxr-staging"
+          New-Item -ItemType Directory -Path $staging
+          Copy-Item "target/x86_64-pc-windows-msvc/release/ndxr.exe" $staging/
+          Copy-Item LICENSE $staging/
+          Copy-Item README.md $staging/
+          Compress-Archive -Path "$staging/*" -DestinationPath "ndxr-$env:TAG-windows-amd64.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ndxr-windows-amd64
+          path: ndxr-*-windows-amd64.zip
+
+  release:
+    needs: [build-linux, build-macos, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: artifacts
+        run: sha256sum ndxr-* > checksums.txt
+
+      - name: Extract changelog for this version
+        id: changelog
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG#v}"
+          CONTENT=$(awk "/^## \[${VERSION}\]/{found=1; next} /^## \[/{if(found) exit} found{print}" CHANGELOG.md)
+          {
+            echo "body<<CHANGELOG_EOF"
+            echo "$CONTENT"
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          body: |
+            ${{ steps.changelog.outputs.body }}
+
+            ## Install
+
+            Download the archive for your platform, extract, and place the binary in your `$PATH`.
+
+            | Platform | Archive |
+            |----------|---------|
+            | Linux (x86_64) | `ndxr-${{ github.ref_name }}-linux-amd64.tar.gz` |
+            | Linux (ARM64) | `ndxr-${{ github.ref_name }}-linux-arm64.tar.gz` |
+            | macOS (Intel) | `ndxr-${{ github.ref_name }}-darwin-amd64.tar.gz` |
+            | macOS (Apple Silicon) | `ndxr-${{ github.ref_name }}-darwin-arm64.tar.gz` |
+            | Windows (x86_64) | `ndxr-${{ github.ref_name }}-windows-amd64.zip` |
+
+            Verify integrity with `checksums.txt`.
+
+            ## Build from source
+
+            ```bash
+            git clone git@github.com:ndxr/ndxr.git
+            cd ndxr
+            make install
+            ```
+
+            Requires Rust 1.94+ (edition 2024).
