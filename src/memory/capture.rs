@@ -85,6 +85,9 @@ impl ToolCallRecord {
 ///
 /// Skips capture for excluded tools (see [`ToolCallRecord::should_capture`]).
 ///
+/// Callers use `let _ = auto_capture(...)` because capture is best-effort:
+/// a failure to record should never block the tool response.
+///
 /// # Errors
 ///
 /// Returns an error if the database insert fails.

@@ -1,13 +1,14 @@
 //! MCP server implementation with 8 tools for AI coding agents.
 //!
 //! All shared state is held behind `Arc<CoreEngine>` so the server struct
-//! remains `Clone` as required by rmcp. The `rusqlite::Connection` and
-//! `SymbolGraph` are protected by `tokio::sync::Mutex` for safe async access.
+//! remains `Clone` as required by rmcp. The `rusqlite::Connection` is protected
+//! by `tokio::sync::Mutex` and the `SymbolGraph` by `tokio::sync::RwLock`
+//! (read-heavy, written only by the file watcher after re-indexing).
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use petgraph::Direction;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -17,7 +18,7 @@ use rmcp::model::{
 use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tracing::info;
 
 use crate::capsule::builder::{self, CapsuleRequest};
@@ -26,6 +27,7 @@ use crate::config::{NdxrConfig, TokenEstimator};
 use crate::graph::builder::SymbolGraph;
 use crate::graph::intent;
 use crate::memory::{capture, compression, search as mem_search, store};
+use crate::storage::db::BATCH_PARAM_LIMIT;
 use crate::{graph, indexer, skeleton, storage};
 
 /// Default token budget for MCP tool responses.
@@ -45,6 +47,21 @@ const DEFAULT_MEMORY_LIMIT: usize = 5;
 
 /// Default session context count.
 const DEFAULT_SESSION_COUNT: usize = 3;
+
+/// Hard upper limit for impact graph traversal depth.
+const MAX_IMPACT_DEPTH: usize = 10;
+
+/// Hard upper limit for memory search results.
+const MAX_MEMORY_LIMIT: usize = 50;
+
+/// Hard upper limit for session context count.
+const MAX_SESSION_COUNT: usize = 20;
+
+/// Maximum observation content length (64 KiB).
+const MAX_OBSERVATION_CONTENT: usize = 65_536;
+
+/// Accepted observation kinds for `save_observation`.
+const VALID_OBSERVATION_KINDS: &[&str] = &["insight", "decision", "error", "manual"];
 
 // ---------------------------------------------------------------------------
 // Response structs (defined at module level to satisfy items_after_statements)
@@ -87,8 +104,8 @@ struct ImpactResult {
     callers_count: usize,
     /// Number of transitive callees found.
     callees_count: usize,
-    /// Blast radius classification: "low", "medium", or "high".
-    blast_radius: String,
+    /// Blast radius classification.
+    blast_radius: crate::capsule::BlastRadius,
     /// All discovered nodes.
     nodes: Vec<ImpactNode>,
 }
@@ -159,14 +176,16 @@ struct ObservationDetail {
 /// Shared engine state for the MCP server.
 ///
 /// Holds the database connection, in-memory graph, and configuration behind
-/// async-aware mutexes so multiple tool calls can be served concurrently.
+/// async-aware locks so multiple tool calls can be served concurrently.
+/// The graph uses `RwLock` because it is read-only during tool calls and
+/// only written by the file watcher after re-indexing.
 pub struct CoreEngine {
     /// Runtime configuration.
     pub config: NdxrConfig,
     /// Database connection protected by an async mutex.
     pub conn: Mutex<rusqlite::Connection>,
     /// In-memory symbol graph, rebuilt after each index operation.
-    pub graph: Mutex<Option<SymbolGraph>>,
+    pub graph: RwLock<Option<SymbolGraph>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -261,9 +280,9 @@ struct SaveObservationParams {
 /// Parameters for the `get_session_context` tool.
 #[derive(Deserialize, JsonSchema)]
 struct GetSessionContextParams {
-    /// Number of recent sessions to include (default: 5).
+    /// Number of recent sessions to include (default: 3).
     session_count: Option<usize>,
-    /// Include compressed sessions (default: false).
+    /// Include compressed sessions (default: true).
     include_compressed: Option<bool>,
 }
 
@@ -274,6 +293,7 @@ struct GetSessionContextParams {
 #[tool_router]
 impl NdxrServer {
     /// Creates a new `NdxrServer` instance.
+    #[must_use]
     pub fn new(engine: Arc<CoreEngine>, session_id: String) -> Self {
         Self {
             tool_router: Self::tool_router(),
@@ -299,7 +319,7 @@ impl NdxrServer {
             .min(MAX_TOKEN_BUDGET);
 
         let conn_guard = self.engine.conn.lock().await;
-        let graph_guard = self.engine.graph.lock().await;
+        let graph_guard = self.engine.graph.read().await;
 
         let graph_ref = graph_guard
             .as_ref()
@@ -307,63 +327,37 @@ impl NdxrServer {
 
         let intent = intent::detect_intent(query);
 
-        let results = relaxation::search_with_relaxation(
+        let mut pipeline = run_capsule_pipeline(
             &conn_guard,
             graph_ref,
             query,
-            DEFAULT_MAX_RESULTS,
-            Some(intent),
-        )
-        .map_err(|e| rmcp::ErrorData::internal_error(format!("search failed: {e}"), None))?;
-
-        let estimator = TokenEstimator::default();
-        let req = CapsuleRequest {
-            conn: &conn_guard,
-            graph: graph_ref,
-            search_results: &results,
-            query,
-            intent: &intent,
-            token_budget: budget,
-            estimator: &estimator,
-            workspace_root: &self.engine.config.workspace_root,
-        };
-        let mut capsule = builder::build_capsule(&req).map_err(|e| {
-            rmcp::ErrorData::internal_error(format!("capsule build failed: {e}"), None)
-        })?;
-
-        let pivot_fqns: Vec<String> = results.iter().map(|r| r.fqn.clone()).collect();
-        let memories = mem_search::search_memories(
-            &conn_guard,
-            query,
-            &pivot_fqns,
-            DEFAULT_MEMORY_LIMIT,
-            false,
+            intent,
+            budget,
+            &self.engine.config.workspace_root,
             self.engine.config.recency_half_life_days,
-        )
-        .map_err(|e| rmcp::ErrorData::internal_error(format!("memory search failed: {e}"), None))?;
+        )?;
 
-        capsule.memories = memories.iter().map(memory_entry_from).collect();
-        capsule.impact_hints = builder::generate_impact_hints(graph_ref, &results);
+        pipeline.capsule.impact_hints =
+            builder::generate_impact_hints(graph_ref, &pipeline.search_results);
 
         let record = capture::ToolCallRecord {
             tool_name: "run_pipeline".to_owned(),
-            intent: Some(format!("{intent:?}").to_lowercase()),
+            intent: Some(intent.name().to_owned()),
             query: Some(query.to_owned()),
-            pivot_fqns,
+            pivot_fqns: pipeline.pivot_fqns,
             result_summary: format!(
                 "{} pivots, {} skeletons, {} memories",
-                capsule.pivots.len(),
-                capsule.skeletons.len(),
-                capsule.memories.len()
+                pipeline.capsule.pivots.len(),
+                pipeline.capsule.skeletons.len(),
+                pipeline.capsule.memories.len()
             ),
         };
-        let _ = capture::auto_capture(&conn_guard, &self.session_id, &record);
-        let _ = store::update_session_active(&conn_guard, &self.session_id);
+        commit_tool_record(&conn_guard, &self.session_id, &record);
 
         drop(graph_guard);
         drop(conn_guard);
 
-        to_json_result(&capsule)
+        to_json_result(&pipeline.capsule)
     }
 
     /// Search the codebase and build a context capsule (no impact hints).
@@ -383,7 +377,7 @@ impl NdxrServer {
         let intent_override = params.0.intent.as_deref().and_then(intent::parse_intent);
 
         let conn_guard = self.engine.conn.lock().await;
-        let graph_guard = self.engine.graph.lock().await;
+        let graph_guard = self.engine.graph.read().await;
 
         let graph_ref = graph_guard
             .as_ref()
@@ -391,61 +385,33 @@ impl NdxrServer {
 
         let intent = intent_override.unwrap_or_else(|| intent::detect_intent(query));
 
-        let results = relaxation::search_with_relaxation(
+        let pipeline = run_capsule_pipeline(
             &conn_guard,
             graph_ref,
             query,
-            DEFAULT_MAX_RESULTS,
-            Some(intent),
-        )
-        .map_err(|e| rmcp::ErrorData::internal_error(format!("search failed: {e}"), None))?;
-
-        let estimator = TokenEstimator::default();
-        let req = CapsuleRequest {
-            conn: &conn_guard,
-            graph: graph_ref,
-            search_results: &results,
-            query,
-            intent: &intent,
-            token_budget: budget,
-            estimator: &estimator,
-            workspace_root: &self.engine.config.workspace_root,
-        };
-        let mut capsule = builder::build_capsule(&req).map_err(|e| {
-            rmcp::ErrorData::internal_error(format!("capsule build failed: {e}"), None)
-        })?;
-
-        let pivot_fqns: Vec<String> = results.iter().map(|r| r.fqn.clone()).collect();
-        let memories = mem_search::search_memories(
-            &conn_guard,
-            query,
-            &pivot_fqns,
-            DEFAULT_MEMORY_LIMIT,
-            false,
+            intent,
+            budget,
+            &self.engine.config.workspace_root,
             self.engine.config.recency_half_life_days,
-        )
-        .map_err(|e| rmcp::ErrorData::internal_error(format!("memory search failed: {e}"), None))?;
-
-        capsule.memories = memories.iter().map(memory_entry_from).collect();
+        )?;
 
         let record = capture::ToolCallRecord {
             tool_name: "get_context_capsule".to_owned(),
-            intent: Some(format!("{intent:?}").to_lowercase()),
+            intent: Some(intent.name().to_owned()),
             query: Some(query.to_owned()),
-            pivot_fqns,
+            pivot_fqns: pipeline.pivot_fqns,
             result_summary: format!(
                 "{} pivots, {} skeletons",
-                capsule.pivots.len(),
-                capsule.skeletons.len()
+                pipeline.capsule.pivots.len(),
+                pipeline.capsule.skeletons.len()
             ),
         };
-        let _ = capture::auto_capture(&conn_guard, &self.session_id, &record);
-        let _ = store::update_session_active(&conn_guard, &self.session_id);
+        commit_tool_record(&conn_guard, &self.session_id, &record);
 
         drop(graph_guard);
         drop(conn_guard);
 
-        to_json_result(&capsule)
+        to_json_result(&pipeline.capsule)
     }
 
     /// Render files as signature-only skeletons.
@@ -468,11 +434,11 @@ impl NdxrServer {
 
         let result: Vec<SkeletonResult> = skeletons
             .into_iter()
-            .map(|(path, content, sym_count, line_count)| SkeletonResult {
-                path,
-                skeleton: content,
-                symbol_count: sym_count,
-                original_lines: line_count,
+            .map(|s| SkeletonResult {
+                path: s.path,
+                skeleton: s.content,
+                symbol_count: s.symbol_count,
+                original_lines: s.original_lines,
             })
             .collect();
 
@@ -483,8 +449,7 @@ impl NdxrServer {
             pivot_fqns: Vec::new(),
             result_summary: format!("{} files", result.len()),
         };
-        let _ = capture::auto_capture(&conn_guard, &self.session_id, &record);
-        let _ = store::update_session_active(&conn_guard, &self.session_id);
+        commit_tool_record(&conn_guard, &self.session_id, &record);
 
         drop(conn_guard);
 
@@ -500,12 +465,16 @@ impl NdxrServer {
         params: Parameters<GetImpactGraphParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let fqn = &params.0.symbol_fqn;
-        let max_depth = params.0.depth.unwrap_or(DEFAULT_IMPACT_DEPTH);
+        let max_depth = params
+            .0
+            .depth
+            .unwrap_or(DEFAULT_IMPACT_DEPTH)
+            .min(MAX_IMPACT_DEPTH);
         let include_callers = params.0.include_callers.unwrap_or(true);
         let include_callees = params.0.include_callees.unwrap_or(true);
 
         let conn_guard = self.engine.conn.lock().await;
-        let graph_guard = self.engine.graph.lock().await;
+        let graph_guard = self.engine.graph.read().await;
 
         let graph_ref = graph_guard
             .as_ref()
@@ -515,8 +484,13 @@ impl NdxrServer {
             .query_row("SELECT id FROM symbols WHERE fqn = ?1", [fqn], |row| {
                 row.get(0)
             })
-            .map_err(|_| {
-                rmcp::ErrorData::invalid_params(format!("symbol not found: {fqn}"), None)
+            .map_err(|e| {
+                if e == rusqlite::Error::QueryReturnedNoRows {
+                    rmcp::ErrorData::invalid_params(format!("symbol not found: {fqn}"), None)
+                } else {
+                    tracing::error!("database error looking up symbol {fqn}: {e}");
+                    rmcp::ErrorData::internal_error("database error during symbol lookup", None)
+                }
             })?;
 
         let start_node = graph_ref.id_to_node.get(&sym_id).ok_or_else(|| {
@@ -526,42 +500,38 @@ impl NdxrServer {
         let mut nodes = Vec::new();
 
         if include_callers {
-            bfs_collect_nodes(
+            let caller_nodes = bfs_collect_nodes(
                 &conn_guard,
                 graph_ref,
                 *start_node,
                 Direction::Incoming,
                 max_depth,
                 "caller",
-                &mut nodes,
             );
+            nodes.extend(caller_nodes);
         }
 
         if include_callees {
-            bfs_collect_nodes(
+            let callee_nodes = bfs_collect_nodes(
                 &conn_guard,
                 graph_ref,
                 *start_node,
                 Direction::Outgoing,
                 max_depth,
                 "callee",
-                &mut nodes,
             );
+            nodes.extend(callee_nodes);
         }
 
         let total_callers = nodes.iter().filter(|n| n.direction == "caller").count();
         let callees_count = nodes.iter().filter(|n| n.direction == "callee").count();
-        let blast_radius = match total_callers {
-            0..=4 => "low",
-            5..=20 => "medium",
-            _ => "high",
-        };
+        let blast_radius = crate::capsule::BlastRadius::from_caller_count(total_callers);
 
         let result = ImpactResult {
             symbol_fqn: fqn.clone(),
             callers_count: total_callers,
             callees_count,
-            blast_radius: blast_radius.to_owned(),
+            blast_radius,
             nodes,
         };
 
@@ -574,8 +544,7 @@ impl NdxrServer {
                 "{total_callers} callers, {callees_count} callees, blast={blast_radius}"
             ),
         };
-        let _ = capture::auto_capture(&conn_guard, &self.session_id, &record);
-        let _ = store::update_session_active(&conn_guard, &self.session_id);
+        commit_tool_record(&conn_guard, &self.session_id, &record);
 
         drop(graph_guard);
         drop(conn_guard);
@@ -592,7 +561,11 @@ impl NdxrServer {
         params: Parameters<SearchMemoryParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let query = &params.0.query;
-        let limit = params.0.limit.unwrap_or(DEFAULT_MEMORY_LIMIT);
+        let limit = params
+            .0
+            .limit
+            .unwrap_or(DEFAULT_MEMORY_LIMIT)
+            .min(MAX_MEMORY_LIMIT);
         let include_stale = params.0.include_stale.unwrap_or(false);
 
         let conn_guard = self.engine.conn.lock().await;
@@ -638,7 +611,25 @@ impl NdxrServer {
         &self,
         params: Parameters<SaveObservationParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if params.0.content.len() > MAX_OBSERVATION_CONTENT {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!("content exceeds maximum size of {MAX_OBSERVATION_CONTENT} bytes"),
+                None,
+            ));
+        }
+
         let kind = params.0.kind.as_deref().unwrap_or("manual");
+
+        if !VALID_OBSERVATION_KINDS.contains(&kind) {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!(
+                    "invalid kind: {kind}, expected one of: {}",
+                    VALID_OBSERVATION_KINDS.join(", ")
+                ),
+                None,
+            ));
+        }
+
         let linked = params.0.linked_symbols.unwrap_or_default();
 
         let conn_guard = self.engine.conn.lock().await;
@@ -666,9 +657,7 @@ impl NdxrServer {
             "status": "saved"
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&result).unwrap_or_default(),
-        )]))
+        to_json_result(&result)
     }
 
     /// Retrieve recent session context and observations.
@@ -679,7 +668,11 @@ impl NdxrServer {
         &self,
         params: Parameters<GetSessionContextParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let count = params.0.session_count.unwrap_or(DEFAULT_SESSION_COUNT);
+        let count = params
+            .0
+            .session_count
+            .unwrap_or(DEFAULT_SESSION_COUNT)
+            .min(MAX_SESSION_COUNT);
         let include_compressed = params.0.include_compressed.unwrap_or(true);
 
         let conn_guard = self.engine.conn.lock().await;
@@ -692,7 +685,13 @@ impl NdxrServer {
         let mut result = Vec::new();
         for session in sessions {
             let observations = store::get_session_observations(&conn_guard, &session.id)
-                .unwrap_or_default()
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        "failed to load observations for session {}: {e}",
+                        session.id
+                    );
+                    Vec::new()
+                })
                 .into_iter()
                 .map(|obs| ObservationDetail {
                     id: obs.id,
@@ -723,8 +722,7 @@ impl NdxrServer {
             pivot_fqns: Vec::new(),
             result_summary: format!("{} sessions", result.len()),
         };
-        let _ = capture::auto_capture(&conn_guard, &self.session_id, &record);
-        let _ = store::update_session_active(&conn_guard, &self.session_id);
+        commit_tool_record(&conn_guard, &self.session_id, &record);
 
         drop(conn_guard);
 
@@ -738,49 +736,26 @@ impl NdxrServer {
     async fn index_status(&self) -> Result<CallToolResult, rmcp::ErrorData> {
         let conn_guard = self.engine.conn.lock().await;
 
-        let file_count: i64 = conn_guard
-            .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
-            .unwrap_or(0);
-        let symbol_count: i64 = conn_guard
-            .query_row("SELECT COUNT(*) FROM symbols", [], |row| row.get(0))
-            .unwrap_or(0);
-        let edge_count: i64 = conn_guard
-            .query_row("SELECT COUNT(*) FROM edges", [], |row| row.get(0))
-            .unwrap_or(0);
-        let observation_count: i64 = conn_guard
-            .query_row("SELECT COUNT(*) FROM observations", [], |row| row.get(0))
-            .unwrap_or(0);
-        let session_count: i64 = conn_guard
-            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
-            .unwrap_or(0);
-        let oldest_index: Option<i64> = conn_guard
-            .query_row("SELECT MIN(indexed_at) FROM files", [], |row| row.get(0))
-            .unwrap_or(None);
-        let newest_index: Option<i64> = conn_guard
-            .query_row("SELECT MAX(indexed_at) FROM files", [], |row| row.get(0))
-            .unwrap_or(None);
-
-        let db_size_bytes = std::fs::metadata(&self.engine.config.db_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let status = crate::status::collect_index_status(&conn_guard, &self.engine.config.db_path)
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("status query failed: {e}"), None)
+            })?;
 
         drop(conn_guard);
 
         let result = serde_json::json!({
-            "files": file_count,
-            "symbols": symbol_count,
-            "edges": edge_count,
-            "observations": observation_count,
-            "sessions": session_count,
-            "oldest_index_at": oldest_index,
-            "newest_index_at": newest_index,
-            "db_size_bytes": db_size_bytes,
+            "files": status.file_count,
+            "symbols": status.symbol_count,
+            "edges": status.edge_count,
+            "observations": status.observation_count,
+            "sessions": status.session_count,
+            "oldest_index_at": status.oldest_indexed_at,
+            "newest_index_at": status.newest_indexed_at,
+            "db_size_bytes": status.db_size_bytes,
             "workspace_root": self.engine.config.workspace_root.display().to_string(),
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&result).unwrap_or_default(),
-        )]))
+        to_json_result(&result)
     }
 }
 
@@ -858,7 +833,7 @@ pub async fn start_mcp_server(config: NdxrConfig) -> Result<()> {
     let engine = Arc::new(CoreEngine {
         config,
         conn: Mutex::new(conn),
-        graph: Mutex::new(Some(graph_result)),
+        graph: RwLock::new(Some(graph_result)),
     });
 
     // Start file watcher for incremental re-indexing
@@ -886,6 +861,89 @@ pub async fn start_mcp_server(config: NdxrConfig) -> Result<()> {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Persists a tool call record and updates session activity (best-effort).
+fn commit_tool_record(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    record: &capture::ToolCallRecord,
+) {
+    let _ = capture::auto_capture(conn, session_id, record);
+    let _ = store::update_session_active(conn, session_id);
+}
+
+/// Result of the shared capsule pipeline.
+struct PipelineResult {
+    /// The assembled context capsule.
+    capsule: crate::capsule::Capsule,
+    /// FQNs of the pivot symbols from search results.
+    pivot_fqns: Vec<String>,
+    /// The raw search results (needed for impact hint generation).
+    search_results: Vec<crate::graph::search::SearchResult>,
+}
+
+/// Runs the shared capsule pipeline: search, build capsule, recall memories, populate stats.
+///
+/// Used by both `run_pipeline` (which adds impact hints) and `get_context_capsule`.
+fn run_capsule_pipeline(
+    conn: &rusqlite::Connection,
+    graph: &crate::graph::builder::SymbolGraph,
+    query: &str,
+    intent: intent::Intent,
+    budget: usize,
+    workspace_root: &std::path::Path,
+    recency_half_life_days: f64,
+) -> Result<PipelineResult, rmcp::ErrorData> {
+    let search_start = std::time::Instant::now();
+    let outcome =
+        relaxation::search_with_relaxation(conn, graph, query, DEFAULT_MAX_RESULTS, Some(intent))
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("search failed: {e}"), None))?;
+    let search_time_ms = search_start.elapsed().as_millis();
+    let results = outcome.results;
+    let relaxation_applied = outcome.relaxation_applied;
+
+    let estimator = TokenEstimator::default();
+    let req = CapsuleRequest {
+        conn,
+        graph,
+        search_results: &results,
+        query,
+        intent: &intent,
+        token_budget: budget,
+        estimator: &estimator,
+        workspace_root,
+    };
+    let mut capsule = builder::build_capsule(&req)
+        .map_err(|e| rmcp::ErrorData::internal_error(format!("capsule build failed: {e}"), None))?;
+
+    let pivot_fqns: Vec<String> = results.iter().map(|r| r.fqn.clone()).collect();
+    let memories = mem_search::search_memories(
+        conn,
+        query,
+        &pivot_fqns,
+        DEFAULT_MEMORY_LIMIT,
+        false,
+        recency_half_life_days,
+    )
+    .map_err(|e| rmcp::ErrorData::internal_error(format!("memory search failed: {e}"), None))?;
+
+    capsule.memories = memories.iter().map(memory_entry_from).collect();
+    capsule.stats.memory_count = capsule.memories.len();
+    capsule.stats.tokens_memories = capsule
+        .memories
+        .iter()
+        .map(|m| estimator.estimate(&m.content))
+        .sum();
+    capsule.stats.tokens_used += capsule.stats.tokens_memories;
+    capsule.stats.search_time_ms = search_time_ms;
+    capsule.stats.relaxation_applied = relaxation_applied;
+
+    Ok(PipelineResult {
+        capsule,
+        pivot_fqns,
+        search_results: results,
+    })
+}
+
 /// Converts a memory search result to a capsule memory entry.
 fn memory_entry_from(m: &mem_search::MemoryResult) -> crate::capsule::MemoryEntry {
     crate::capsule::MemoryEntry {
@@ -907,6 +965,10 @@ fn to_json_result<T: Serialize>(value: &T) -> Result<CallToolResult, rmcp::Error
 }
 
 /// BFS traversal collecting nodes in a given direction from a start node.
+///
+/// Separates graph traversal from database metadata lookup: first collects
+/// all reachable `(NodeIndex, depth)` pairs via BFS with no DB queries, then
+/// batch-loads metadata for all discovered symbol IDs in a single query.
 fn bfs_collect_nodes(
     conn: &rusqlite::Connection,
     graph: &SymbolGraph,
@@ -914,42 +976,95 @@ fn bfs_collect_nodes(
     direction: Direction,
     max_depth: usize,
     direction_label: &str,
-    nodes: &mut Vec<ImpactNode>,
-) {
+) -> Vec<ImpactNode> {
+    // 1. BFS traversal (graph-only, no DB queries).
     let mut queue: VecDeque<(petgraph::graph::NodeIndex, usize)> = VecDeque::new();
     queue.push_back((start, 0));
     let mut visited = HashSet::new();
     visited.insert(start);
+    let mut collected: Vec<(petgraph::graph::NodeIndex, usize)> = Vec::new();
 
     while let Some((node, depth)) = queue.pop_front() {
         if depth >= max_depth {
             continue;
         }
         for neighbor in graph.graph.neighbors_directed(node, direction) {
-            if visited.insert(neighbor)
-                && let Some(&id) = graph.node_to_id.get(&neighbor)
-                && let Ok((node_fqn, kind, file_path)) = conn.query_row(
-                    "SELECT s.fqn, s.kind, f.path FROM symbols s \
-                     JOIN files f ON s.file_id = f.id WHERE s.id = ?1",
-                    [id],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                        ))
-                    },
-                )
-            {
-                nodes.push(ImpactNode {
-                    fqn: node_fqn,
-                    kind,
-                    file_path,
-                    depth: depth + 1,
-                    direction: direction_label.to_owned(),
-                });
+            if visited.insert(neighbor) {
+                collected.push((neighbor, depth + 1));
                 queue.push_back((neighbor, depth + 1));
             }
         }
     }
+
+    // 2. Collect symbol IDs from the traversal.
+    let id_depth_pairs: Vec<(i64, usize)> = collected
+        .iter()
+        .filter_map(|(node_idx, depth)| graph.node_to_id.get(node_idx).map(|&id| (id, *depth)))
+        .collect();
+    let sym_ids: Vec<i64> = id_depth_pairs.iter().map(|(id, _)| *id).collect();
+    let id_to_depth: HashMap<i64, usize> = id_depth_pairs.into_iter().collect();
+
+    // 3. Batch-query metadata for all symbol IDs.
+    let metadata = batch_load_impact_metadata(conn, &sym_ids).unwrap_or_else(|e| {
+        tracing::warn!("batch_load_impact_metadata failed: {e}");
+        HashMap::new()
+    });
+
+    // 4. Build ImpactNode objects from the HashMap.
+    let mut nodes = Vec::with_capacity(sym_ids.len());
+    for sym_id in &sym_ids {
+        if let Some((fqn, kind, file_path)) = metadata.get(sym_id) {
+            let depth = id_to_depth.get(sym_id).copied().unwrap_or(1);
+            nodes.push(ImpactNode {
+                fqn: fqn.clone(),
+                kind: kind.clone(),
+                file_path: file_path.clone(),
+                depth,
+                direction: direction_label.to_owned(),
+            });
+        }
+    }
+    nodes
+}
+
+/// Batch-loads `(fqn, kind, file_path)` for a set of symbol IDs.
+///
+/// Chunks IDs into groups of `BATCH_PARAM_LIMIT` to stay within the `SQLite`
+/// parameter limit.
+fn batch_load_impact_metadata(
+    conn: &rusqlite::Connection,
+    ids: &[i64],
+) -> anyhow::Result<HashMap<i64, (String, String, String)>> {
+    let mut result = HashMap::with_capacity(ids.len());
+    for chunk in ids.chunks(BATCH_PARAM_LIMIT) {
+        let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "SELECT s.id, s.fqn, s.kind, f.path FROM symbols s \
+             JOIN files f ON s.file_id = f.id \
+             WHERE s.id IN ({})",
+            placeholders.join(", ")
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .context("prepare batch_load_impact_metadata")?;
+        let params: Vec<&dyn rusqlite::types::ToSql> = chunk
+            .iter()
+            .map(|id| id as &dyn rusqlite::types::ToSql)
+            .collect();
+        let rows = stmt
+            .query_map(params.as_slice(), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .context("query batch impact metadata")?;
+        for row in rows {
+            let (id, fqn, kind, path) = row.context("read impact metadata row")?;
+            result.insert(id, (fqn, kind, path));
+        }
+    }
+    Ok(result)
 }

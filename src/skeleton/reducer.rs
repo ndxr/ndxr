@@ -4,8 +4,12 @@
 //! members are detected by line-range containment and indented under their
 //! parent. Optionally includes docstrings as `///` comment lines.
 
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
 use rusqlite::Connection;
+
+use crate::storage::db::BATCH_PARAM_LIMIT;
 
 /// A row of symbol data loaded from the database.
 #[derive(Debug, Clone)]
@@ -72,22 +76,25 @@ pub fn render_file_skeleton(symbols: &[SymbolRow], include_docs: bool) -> String
     let mut sorted: Vec<&SymbolRow> = symbols.iter().collect();
     sorted.sort_by_key(|s| s.start_line);
 
-    // Identify container (parent) symbols by kind.
-    // A symbol is a child if its start_line and end_line fall within a container's range.
-    let containers: Vec<&SymbolRow> = sorted
+    // Identify container (parent) symbols by kind, sorted by start_line
+    // for efficient parent lookup via binary search.
+    let mut containers: Vec<&SymbolRow> = sorted
         .iter()
         .filter(|s| is_container_kind(&s.kind))
         .copied()
         .collect();
+    containers.sort_by_key(|s| s.start_line);
 
     let mut lines = Vec::new();
 
     for sym in &sorted {
-        let is_child = containers.iter().any(|parent| {
-            parent.id != sym.id
-                && sym.start_line >= parent.start_line
-                && sym.end_line <= parent.end_line
-        });
+        // Binary-search to find the rightmost container with start_line <= sym.start_line,
+        // then scan backwards — only candidates that start before the symbol can contain it.
+        let upper = containers.partition_point(|c| c.start_line <= sym.start_line);
+        let is_child = containers[..upper]
+            .iter()
+            .rev()
+            .any(|parent| parent.id != sym.id && sym.end_line <= parent.end_line);
 
         let indent = if is_child { "  " } else { "" };
 
@@ -117,7 +124,9 @@ pub fn render_signature(symbol: &SymbolRow) -> String {
 
 /// Loads all symbols for the given file paths from the database.
 ///
-/// Results are ordered by file path and then by start line within each file.
+/// Chunks paths into groups of `BATCH_PARAM_LIMIT` to stay within the `SQLite`
+/// parameter limit. Results are ordered by file path and then by start line
+/// within each file.
 ///
 /// # Errors
 ///
@@ -127,52 +136,67 @@ pub fn load_file_symbols(conn: &Connection, file_paths: &[String]) -> Result<Vec
         return Ok(Vec::new());
     }
 
-    // Build a parameterized IN clause.
-    let placeholders: Vec<String> = (1..=file_paths.len()).map(|i| format!("?{i}")).collect();
-    let sql = format!(
-        "SELECT s.id, s.name, s.kind, s.fqn, s.signature, s.docstring, \
-                s.start_line, s.end_line, s.is_exported, f.path \
-         FROM symbols s \
-         JOIN files f ON s.file_id = f.id \
-         WHERE f.path IN ({}) \
-         ORDER BY f.path, s.start_line",
-        placeholders.join(", ")
-    );
-
-    let mut stmt = conn.prepare(&sql).context("prepare load_file_symbols")?;
-
-    let params: Vec<&dyn rusqlite::types::ToSql> = file_paths
-        .iter()
-        .map(|p| p as &dyn rusqlite::types::ToSql)
-        .collect();
-
-    let rows = stmt
-        .query_map(params.as_slice(), |row| {
-            Ok(SymbolRow {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                kind: row.get(2)?,
-                fqn: row.get(3)?,
-                signature: row.get(4)?,
-                docstring: row.get(5)?,
-                start_line: row.get(6)?,
-                end_line: row.get(7)?,
-                is_exported: row.get(8)?,
-                file_path: row.get(9)?,
-            })
-        })
-        .context("query file symbols")?;
-
     let mut result = Vec::new();
-    for row in rows {
-        result.push(row.context("read symbol row")?);
+
+    for chunk in file_paths.chunks(BATCH_PARAM_LIMIT) {
+        let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "SELECT s.id, s.name, s.kind, s.fqn, s.signature, s.docstring, \
+                    s.start_line, s.end_line, s.is_exported, f.path \
+             FROM symbols s \
+             JOIN files f ON s.file_id = f.id \
+             WHERE f.path IN ({}) \
+             ORDER BY f.path, s.start_line",
+            placeholders.join(", ")
+        );
+
+        let mut stmt = conn.prepare(&sql).context("prepare load_file_symbols")?;
+
+        let params: Vec<&dyn rusqlite::types::ToSql> = chunk
+            .iter()
+            .map(|p| p as &dyn rusqlite::types::ToSql)
+            .collect();
+
+        let rows = stmt
+            .query_map(params.as_slice(), |row| {
+                Ok(SymbolRow {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    kind: row.get(2)?,
+                    fqn: row.get(3)?,
+                    signature: row.get(4)?,
+                    docstring: row.get(5)?,
+                    start_line: row.get(6)?,
+                    end_line: row.get(7)?,
+                    is_exported: row.get(8)?,
+                    file_path: row.get(9)?,
+                })
+            })
+            .context("query file symbols")?;
+
+        for row in rows {
+            result.push(row.context("read symbol row")?);
+        }
     }
+
     Ok(result)
+}
+
+/// A rendered skeleton file with metadata.
+#[derive(Debug, Clone)]
+pub struct RenderedSkeleton {
+    /// Relative file path.
+    pub path: String,
+    /// Rendered skeleton content (signatures only).
+    pub content: String,
+    /// Number of symbols included.
+    pub symbol_count: usize,
+    /// Original line count of the source file.
+    pub original_lines: i64,
 }
 
 /// Renders skeletons for multiple files.
 ///
-/// Returns a list of `(file_path, skeleton_text, symbol_count, original_line_count)` tuples.
 /// Files with no symbols are omitted from the output.
 ///
 /// # Errors
@@ -182,7 +206,7 @@ pub fn render_skeletons(
     conn: &Connection,
     file_paths: &[String],
     include_docs: bool,
-) -> Result<Vec<(String, String, usize, i64)>> {
+) -> Result<Vec<RenderedSkeleton>> {
     let symbols = load_file_symbols(conn, file_paths)?;
 
     // Group symbols by file_path while preserving order.
@@ -198,23 +222,57 @@ pub fn render_skeletons(
         grouped.push((path, vec![sym]));
     }
 
+    // Batch-load all line counts in one query instead of N queries.
+    let grouped_paths: Vec<String> = grouped.iter().map(|(p, _)| p.clone()).collect();
+    let line_counts = batch_load_line_counts(conn, &grouped_paths)?;
+
     let mut results = Vec::new();
     for (file_path, file_symbols) in &grouped {
         let skeleton = render_file_skeleton(file_symbols, include_docs);
         let sym_count = file_symbols.len();
+        let line_count = line_counts.get(file_path).copied().unwrap_or(0);
 
-        let line_count: i64 = conn
-            .query_row(
-                "SELECT line_count FROM files WHERE path = ?1",
-                [file_path],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-
-        results.push((file_path.clone(), skeleton, sym_count, line_count));
+        results.push(RenderedSkeleton {
+            path: file_path.clone(),
+            content: skeleton,
+            symbol_count: sym_count,
+            original_lines: line_count,
+        });
     }
 
     Ok(results)
+}
+
+/// Batch-loads line counts for a set of file paths.
+///
+/// Chunks paths into groups of `BATCH_PARAM_LIMIT` to stay within the `SQLite`
+/// parameter limit, querying `WHERE path IN (...)` per chunk.
+fn batch_load_line_counts(conn: &Connection, paths: &[String]) -> Result<HashMap<String, i64>> {
+    let mut result = HashMap::with_capacity(paths.len());
+    for chunk in paths.chunks(BATCH_PARAM_LIMIT) {
+        let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "SELECT path, line_count FROM files WHERE path IN ({})",
+            placeholders.join(", ")
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .context("prepare batch_load_line_counts")?;
+        let params: Vec<&dyn rusqlite::types::ToSql> = chunk
+            .iter()
+            .map(|p| p as &dyn rusqlite::types::ToSql)
+            .collect();
+        let rows = stmt
+            .query_map(params.as_slice(), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .context("query batch line counts")?;
+        for row in rows {
+            let (path, count) = row.context("read line count row")?;
+            result.insert(path, count);
+        }
+    }
+    Ok(result)
 }
 
 #[cfg(test)]

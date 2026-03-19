@@ -4,7 +4,6 @@
 //! status inspection, and file skeleton rendering.
 
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -251,31 +250,7 @@ fn cmd_status(json: bool) -> Result<()> {
     let config = ndxr::config::NdxrConfig::from_workspace(root);
     let conn = ndxr::storage::db::open_or_create(&config.db_path)?;
 
-    let file_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
-        .unwrap_or(0);
-    let symbol_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM symbols", [], |row| row.get(0))
-        .unwrap_or(0);
-    let edge_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM edges", [], |row| row.get(0))
-        .unwrap_or(0);
-    let observation_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM observations", [], |row| row.get(0))
-        .unwrap_or(0);
-    let session_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
-        .unwrap_or(0);
-    let oldest_index: Option<i64> = conn
-        .query_row("SELECT MIN(indexed_at) FROM files", [], |row| row.get(0))
-        .unwrap_or(None);
-    let newest_index: Option<i64> = conn
-        .query_row("SELECT MAX(indexed_at) FROM files", [], |row| row.get(0))
-        .unwrap_or(None);
-
-    let db_size_bytes = std::fs::metadata(&config.db_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let status = ndxr::status::collect_index_status(&conn, &config.db_path)?;
 
     let indexed_languages: Vec<String> = conn
         .prepare("SELECT DISTINCT language FROM files ORDER BY language")
@@ -288,16 +263,16 @@ fn cmd_status(json: bool) -> Result<()> {
 
     if json {
         let result = serde_json::json!({
-            "files": file_count,
-            "symbols": symbol_count,
-            "edges": edge_count,
-            "observations": observation_count,
-            "sessions": session_count,
+            "files": status.file_count,
+            "symbols": status.symbol_count,
+            "edges": status.edge_count,
+            "observations": status.observation_count,
+            "sessions": status.session_count,
             "languages": indexed_languages,
             "languages_supported": supported_count,
-            "oldest_index_at": oldest_index,
-            "newest_index_at": newest_index,
-            "db_size_bytes": db_size_bytes,
+            "oldest_index_at": status.oldest_indexed_at,
+            "newest_index_at": status.newest_indexed_at,
+            "db_size_bytes": status.db_size_bytes,
             "workspace_root": config.workspace_root.display().to_string(),
         });
         println!(
@@ -307,9 +282,9 @@ fn cmd_status(json: bool) -> Result<()> {
     } else {
         println!("ndxr index status");
         println!("  Workspace: {}", config.workspace_root.display());
-        println!("  Files:         {file_count}");
-        println!("  Symbols:       {symbol_count}");
-        println!("  Edges:         {edge_count}");
+        println!("  Files:         {}", status.file_count);
+        println!("  Symbols:       {}", status.symbol_count);
+        println!("  Edges:         {}", status.edge_count);
         if indexed_languages.is_empty() {
             println!("  Languages:     none (0 of {supported_count} supported)");
         } else {
@@ -319,10 +294,10 @@ fn cmd_status(json: bool) -> Result<()> {
                 indexed_languages.len()
             );
         }
-        println!("  Sessions:      {session_count}");
-        println!("  Observations:  {observation_count}");
-        println!("  DB size:       {}", format_bytes(db_size_bytes));
-        if let Some(newest) = newest_index {
+        println!("  Sessions:      {}", status.session_count);
+        println!("  Observations:  {}", status.observation_count);
+        println!("  DB size:       {}", format_bytes(status.db_size_bytes));
+        if let Some(newest) = status.newest_indexed_at {
             println!("  Last indexed:  {}", format_age(newest));
         } else {
             println!("  Last indexed:  never");
@@ -342,13 +317,14 @@ fn cmd_search(query: &str, limit: usize, intent_str: Option<&str>, explain: bool
 
     let intent_override = intent_str.and_then(ndxr::graph::intent::parse_intent);
 
-    let results = ndxr::capsule::relaxation::search_with_relaxation(
+    let outcome = ndxr::capsule::relaxation::search_with_relaxation(
         &conn,
         &graph,
         query,
         limit,
         intent_override,
     )?;
+    let results = outcome.results;
 
     if results.is_empty() {
         println!("No results found for: {query}");
@@ -393,9 +369,12 @@ fn cmd_skeleton(files: &[String], include_docs: bool) -> Result<()> {
         return Ok(());
     }
 
-    for (path, content, sym_count, line_count) in &skeletons {
-        println!("--- {path} ({sym_count} symbols, {line_count} lines) ---");
-        println!("{content}");
+    for skel in &skeletons {
+        println!(
+            "--- {} ({} symbols, {} lines) ---",
+            skel.path, skel.symbol_count, skel.original_lines
+        );
+        println!("{}", skel.content);
         println!();
     }
 
@@ -567,15 +546,15 @@ fn format_bytes(bytes: u64) -> String {
     const GIB: u64 = 1024 * 1024 * 1024;
 
     if bytes >= GIB {
-        #[allow(clippy::cast_precision_loss)]
+        #[allow(clippy::cast_precision_loss)] // usize->f64 loss negligible for counts
         let val = bytes as f64 / GIB as f64;
         format!("{val:.1} GiB")
     } else if bytes >= MIB {
-        #[allow(clippy::cast_precision_loss)]
+        #[allow(clippy::cast_precision_loss)] // usize->f64 loss negligible for counts
         let val = bytes as f64 / MIB as f64;
         format!("{val:.1} MiB")
     } else if bytes >= KIB {
-        #[allow(clippy::cast_precision_loss)]
+        #[allow(clippy::cast_precision_loss)] // usize->f64 loss negligible for counts
         let val = bytes as f64 / KIB as f64;
         format!("{val:.1} KiB")
     } else {
@@ -585,12 +564,10 @@ fn format_bytes(bytes: u64) -> String {
 
 /// Formats a Unix timestamp as a human-readable age string.
 fn format_age(timestamp: i64) -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    #[allow(clippy::cast_sign_loss)] // unix_now() is always positive
+    let now = ndxr::util::unix_now() as u64;
 
-    #[allow(clippy::cast_sign_loss)]
+    #[allow(clippy::cast_sign_loss)] // clamped to 0 minimum
     let ts_unsigned = timestamp.max(0) as u64;
     let age_secs = now.saturating_sub(ts_unsigned);
 

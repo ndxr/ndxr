@@ -27,7 +27,7 @@ AI coding agents waste most of their context window reading irrelevant files. nd
 
 ### Key Features
 
-- **14 languages supported** -- See [full list](#supported-languages) below
+- **13 languages supported** -- See [full list](#supported-languages) below
 - **Incremental indexing** -- Only changed files are re-parsed. Second run takes <1s
 - **Live file watcher** -- Detects saves and re-indexes changed files automatically during MCP sessions
 - **Intent detection** -- Understands "fix the auth bug" vs "explain the auth flow" and adjusts results
@@ -67,7 +67,7 @@ ndxr parses your codebase into symbols (functions, classes, methods, types) and 
   Source Files       tree-sitter        SQLite + FTS5        petgraph
  +----------+      +----------+      +---------------+    +-----------+
  | .ts .py  |----->|  Parser  |----->| Symbols/Edges |--->| PageRank  |
- | .rs .go  |      |  14 lang |      | TF-IDF + BM25 |    | Centrality|
+ | .rs .go  |      |  13 lang |      | TF-IDF + BM25 |    | Centrality|
  +----------+      +----------+      +-------+-------+    +-----+-----+
                                              |                  |
                                              v                  v
@@ -99,12 +99,13 @@ ndxr parses your codebase into symbols (functions, classes, methods, types) and 
 
 **Session Memory** -- Automatically captures what the agent works on. Insights and decisions persist across sessions. Stale observations are detected when linked code changes. Inactive sessions are compressed to reduce noise.
 
+For a deeper dive into internals, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
 ## Supported Languages
 
 | Language | Extensions |
 |----------|-----------|
-| TypeScript | `.ts` |
-| TSX | `.tsx` |
+| TypeScript | `.ts`, `.tsx` |
 | JavaScript | `.js`, `.jsx`, `.mjs`, `.cjs` |
 | Python | `.py`, `.pyi` |
 | Go | `.go` |

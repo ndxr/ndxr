@@ -1,74 +1,10 @@
 //! Smoke tests: capsule, skeleton, and token budget edge cases.
 
+mod helpers;
+
 use std::collections::HashSet;
-use std::fs;
 
 use tempfile::TempDir;
-
-// ---------------------------------------------------------------------------
-// Helper: create a multi-file TypeScript project for capsule smoke tests.
-// ---------------------------------------------------------------------------
-
-fn create_capsule_project(tmp: &TempDir) {
-    fs::create_dir(tmp.path().join(".git")).unwrap();
-    fs::create_dir_all(tmp.path().join("src")).unwrap();
-
-    fs::write(
-        tmp.path().join("src/auth.ts"),
-        r#"
-/** Validates authentication tokens */
-export function validateToken(token: string): boolean {
-    return token.length > 0;
-}
-
-export class AuthService {
-    validate(token: string): boolean {
-        return validateToken(token);
-    }
-}
-"#,
-    )
-    .unwrap();
-
-    fs::write(
-        tmp.path().join("src/middleware.ts"),
-        r"
-import { validateToken } from './auth';
-
-export function authMiddleware(req: any): boolean {
-    return validateToken(req.token);
-}
-",
-    )
-    .unwrap();
-
-    fs::write(
-        tmp.path().join("src/routes.ts"),
-        r"
-import { authMiddleware } from './middleware';
-
-export function setupRoutes(app: any): void {
-    app.use(authMiddleware);
-}
-",
-    )
-    .unwrap();
-}
-
-fn index_and_build(
-    tmp: &TempDir,
-) -> (
-    ndxr::config::NdxrConfig,
-    rusqlite::Connection,
-    ndxr::graph::builder::SymbolGraph,
-) {
-    let config = ndxr::config::NdxrConfig::from_workspace(tmp.path().canonicalize().unwrap());
-    ndxr::indexer::index(&config).unwrap();
-    let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
-    let graph = ndxr::graph::builder::build_graph(&conn).unwrap();
-    ndxr::graph::centrality::compute_and_store(&conn, &graph).unwrap();
-    (config, conn, graph)
-}
 
 // ---------------------------------------------------------------------------
 // Helper: build a capsule with given parameters.
@@ -103,8 +39,8 @@ fn build_capsule_with_budget(
 #[test]
 fn capsule_tiny_budget_no_overflow() {
     let tmp = TempDir::new().unwrap();
-    create_capsule_project(&tmp);
-    let (config, conn, graph) = index_and_build(&tmp);
+    helpers::create_capsule_project(&tmp);
+    let (config, conn, graph) = helpers::index_and_build(&tmp);
 
     let results = ndxr::graph::search::hybrid_search(&conn, &graph, "auth", 10, None).unwrap();
 
@@ -128,8 +64,8 @@ fn capsule_tiny_budget_no_overflow() {
 #[test]
 fn capsule_budget_one_still_respects_invariant() {
     let tmp = TempDir::new().unwrap();
-    create_capsule_project(&tmp);
-    let (config, conn, graph) = index_and_build(&tmp);
+    helpers::create_capsule_project(&tmp);
+    let (config, conn, graph) = helpers::index_and_build(&tmp);
 
     let results = ndxr::graph::search::hybrid_search(&conn, &graph, "validate", 10, None).unwrap();
 
@@ -154,8 +90,8 @@ fn capsule_budget_one_still_respects_invariant() {
 #[test]
 fn capsule_large_budget_fits_everything() {
     let tmp = TempDir::new().unwrap();
-    create_capsule_project(&tmp);
-    let (config, conn, graph) = index_and_build(&tmp);
+    helpers::create_capsule_project(&tmp);
+    let (config, conn, graph) = helpers::index_and_build(&tmp);
 
     let results = ndxr::graph::search::hybrid_search(&conn, &graph, "auth", 10, None).unwrap();
     assert!(!results.is_empty(), "search should return results");
@@ -195,8 +131,8 @@ fn capsule_large_budget_fits_everything() {
 #[test]
 fn capsule_single_search_result() {
     let tmp = TempDir::new().unwrap();
-    create_capsule_project(&tmp);
-    let (config, conn, graph) = index_and_build(&tmp);
+    helpers::create_capsule_project(&tmp);
+    let (config, conn, graph) = helpers::index_and_build(&tmp);
 
     // Search for "setupRoutes" which should return exactly 1 result.
     let results =
@@ -230,8 +166,8 @@ fn capsule_single_search_result() {
 #[test]
 fn capsule_stats_consistency() {
     let tmp = TempDir::new().unwrap();
-    create_capsule_project(&tmp);
-    let (config, conn, graph) = index_and_build(&tmp);
+    helpers::create_capsule_project(&tmp);
+    let (config, conn, graph) = helpers::index_and_build(&tmp);
 
     let results = ndxr::graph::search::hybrid_search(&conn, &graph, "auth", 10, None).unwrap();
 
@@ -262,8 +198,8 @@ fn capsule_stats_consistency() {
 #[test]
 fn capsule_no_duplicate_files_across_pivots() {
     let tmp = TempDir::new().unwrap();
-    create_capsule_project(&tmp);
-    let (config, conn, graph) = index_and_build(&tmp);
+    helpers::create_capsule_project(&tmp);
+    let (config, conn, graph) = helpers::index_and_build(&tmp);
 
     let results = ndxr::graph::search::hybrid_search(&conn, &graph, "validate", 10, None).unwrap();
 
@@ -289,8 +225,8 @@ fn capsule_no_duplicate_files_across_pivots() {
 #[test]
 fn capsule_pivot_file_paths_are_relative() {
     let tmp = TempDir::new().unwrap();
-    create_capsule_project(&tmp);
-    let (config, conn, graph) = index_and_build(&tmp);
+    helpers::create_capsule_project(&tmp);
+    let (config, conn, graph) = helpers::index_and_build(&tmp);
 
     let results = ndxr::graph::search::hybrid_search(&conn, &graph, "auth", 10, None).unwrap();
 
@@ -322,8 +258,8 @@ fn capsule_pivot_file_paths_are_relative() {
 #[test]
 fn skeleton_nonexistent_file_returns_empty() {
     let tmp = TempDir::new().unwrap();
-    create_capsule_project(&tmp);
-    let (_config, conn, _graph) = index_and_build(&tmp);
+    helpers::create_capsule_project(&tmp);
+    let (_config, conn, _graph) = helpers::index_and_build(&tmp);
 
     let file_paths = vec!["nonexistent.ts".to_string()];
     let skeletons = ndxr::skeleton::reducer::render_skeletons(&conn, &file_paths, false).unwrap();
@@ -338,8 +274,8 @@ fn skeleton_nonexistent_file_returns_empty() {
 #[test]
 fn skeleton_empty_file_list() {
     let tmp = TempDir::new().unwrap();
-    create_capsule_project(&tmp);
-    let (_config, conn, _graph) = index_and_build(&tmp);
+    helpers::create_capsule_project(&tmp);
+    let (_config, conn, _graph) = helpers::index_and_build(&tmp);
 
     let file_paths: Vec<String> = vec![];
     let skeletons = ndxr::skeleton::reducer::render_skeletons(&conn, &file_paths, false).unwrap();
@@ -353,18 +289,15 @@ fn skeleton_empty_file_list() {
 #[test]
 fn skeleton_with_docs_contains_docstrings() {
     let tmp = TempDir::new().unwrap();
-    create_capsule_project(&tmp);
-    let (_config, conn, _graph) = index_and_build(&tmp);
+    helpers::create_capsule_project(&tmp);
+    let (_config, conn, _graph) = helpers::index_and_build(&tmp);
 
     let file_paths = vec!["src/auth.ts".to_string()];
     let skeletons = ndxr::skeleton::reducer::render_skeletons(&conn, &file_paths, true).unwrap();
 
     assert!(!skeletons.is_empty(), "auth.ts should have symbols");
 
-    let combined: String = skeletons
-        .iter()
-        .map(|(_, content, _, _)| content.as_str())
-        .collect();
+    let combined: String = skeletons.iter().map(|s| s.content.as_str()).collect();
     assert!(
         combined.contains("///"),
         "skeleton with include_docs=true should contain doc comment lines (///)"
@@ -374,22 +307,22 @@ fn skeleton_with_docs_contains_docstrings() {
 #[test]
 fn skeleton_without_docs_excludes_docstrings() {
     let tmp = TempDir::new().unwrap();
-    create_capsule_project(&tmp);
-    let (_config, conn, _graph) = index_and_build(&tmp);
+    helpers::create_capsule_project(&tmp);
+    let (_config, conn, _graph) = helpers::index_and_build(&tmp);
 
     let file_paths = vec!["src/auth.ts".to_string()];
     let skeletons = ndxr::skeleton::reducer::render_skeletons(&conn, &file_paths, false).unwrap();
 
     assert!(!skeletons.is_empty(), "auth.ts should have symbols");
 
-    for (path, content, _, _) in &skeletons {
-        for line in content.lines() {
+    for skel in &skeletons {
+        for line in skel.content.lines() {
             assert!(
                 !line.trim_start().starts_with("///"),
                 "skeleton with include_docs=false should not contain doc lines, \
                  but found '{}' in {}",
                 line,
-                path
+                skel.path
             );
         }
     }
@@ -398,14 +331,14 @@ fn skeleton_without_docs_excludes_docstrings() {
 #[test]
 fn relaxation_empty_query_returns_empty() {
     let tmp = TempDir::new().unwrap();
-    create_capsule_project(&tmp);
-    let (_config, conn, graph) = index_and_build(&tmp);
+    helpers::create_capsule_project(&tmp);
+    let (_config, conn, graph) = helpers::index_and_build(&tmp);
 
-    let results =
+    let outcome =
         ndxr::capsule::relaxation::search_with_relaxation(&conn, &graph, "", 10, None).unwrap();
 
     assert!(
-        results.is_empty(),
+        outcome.results.is_empty(),
         "empty query should return no results even with relaxation"
     );
 }
@@ -413,18 +346,18 @@ fn relaxation_empty_query_returns_empty() {
 #[test]
 fn relaxation_special_chars_only_returns_results() {
     let tmp = TempDir::new().unwrap();
-    create_capsule_project(&tmp);
-    let (_config, conn, graph) = index_and_build(&tmp);
+    helpers::create_capsule_project(&tmp);
+    let (_config, conn, graph) = helpers::index_and_build(&tmp);
 
     // All special characters are stripped by build_fts_query, resulting in empty FTS query.
-    let results =
+    let outcome =
         ndxr::capsule::relaxation::search_with_relaxation(&conn, &graph, "(){}[]", 10, None)
             .unwrap();
 
     // After stripping special chars the query is empty, so relaxation cannot find anything.
     // The important thing is that it does not crash or panic.
     assert!(
-        results.is_empty(),
+        outcome.results.is_empty(),
         "query with only special chars should return empty after sanitization"
     );
 }
@@ -432,8 +365,8 @@ fn relaxation_special_chars_only_returns_results() {
 #[test]
 fn impact_hints_isolated_symbol_is_low() {
     let tmp = TempDir::new().unwrap();
-    create_capsule_project(&tmp);
-    let (_config, conn, graph) = index_and_build(&tmp);
+    helpers::create_capsule_project(&tmp);
+    let (_config, conn, graph) = helpers::index_and_build(&tmp);
 
     // Search for setupRoutes which has few callers/callees in this small project.
     let results =
@@ -447,9 +380,12 @@ fn impact_hints_isolated_symbol_is_low() {
         // In this tiny project, setupRoutes has very few connections.
         // Transitive callers <= 4 maps to "low".
         assert_eq!(
-            hint.blast_radius, "low",
+            hint.blast_radius,
+            ndxr::capsule::BlastRadius::Low,
             "isolated symbol should have low blast_radius, got: {} (callers={}, callees={})",
-            hint.blast_radius, hint.callers, hint.callees
+            hint.blast_radius,
+            hint.callers,
+            hint.callees
         );
     }
 }
@@ -457,8 +393,8 @@ fn impact_hints_isolated_symbol_is_low() {
 #[test]
 fn impact_hints_symbol_not_in_graph() {
     let tmp = TempDir::new().unwrap();
-    create_capsule_project(&tmp);
-    let (_config, _conn, graph) = index_and_build(&tmp);
+    helpers::create_capsule_project(&tmp);
+    let (_config, _conn, graph) = helpers::index_and_build(&tmp);
 
     // Create a fake search result with a symbol_id that does not exist in the graph.
     let fake_results = vec![ndxr::graph::search::SearchResult {

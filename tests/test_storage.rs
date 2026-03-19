@@ -104,7 +104,7 @@ fn schema_version_is_tracked() {
             row.get(0)
         })
         .unwrap();
-    assert!(version >= 1);
+    assert_eq!(version, 1, "exactly one migration should have run");
 }
 
 #[test]

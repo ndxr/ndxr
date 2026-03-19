@@ -49,6 +49,21 @@ pub struct IntentWeights {
     pub boosts: Vec<BoostRule>,
 }
 
+impl Intent {
+    /// Returns the lowercase name of the intent variant.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Debug => "debug",
+            Self::Refactor => "refactor",
+            Self::Modify => "modify",
+            Self::Explore => "explore",
+            Self::Understand => "understand",
+            Self::Test => "test",
+        }
+    }
+}
+
 /// Keywords for each intent category, used for keyword-match scoring.
 const DEBUG_KEYWORDS: &[&str] = &[
     "fix",
@@ -291,9 +306,8 @@ fn test_weights() -> IntentWeights {
     }
 }
 
-/// Parses an intent string into an [`Intent`] value.
+/// Parses a string into an [`Intent`] variant (case-insensitive).
 ///
-/// Accepts lowercase names: debug, test, refactor, modify, understand, explore.
 /// Returns `None` for unrecognized strings.
 #[must_use]
 pub fn parse_intent(s: &str) -> Option<Intent> {
@@ -356,6 +370,16 @@ mod tests {
     #[test]
     fn empty_query_is_explore() {
         assert_eq!(detect_intent(""), Intent::Explore);
+    }
+
+    #[test]
+    fn intent_name_returns_lowercase() {
+        assert_eq!(Intent::Debug.name(), "debug");
+        assert_eq!(Intent::Refactor.name(), "refactor");
+        assert_eq!(Intent::Modify.name(), "modify");
+        assert_eq!(Intent::Explore.name(), "explore");
+        assert_eq!(Intent::Understand.name(), "understand");
+        assert_eq!(Intent::Test.name(), "test");
     }
 
     #[test]

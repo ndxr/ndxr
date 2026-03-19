@@ -16,6 +16,15 @@ use crate::indexer::tokenizer;
 /// Multiplier applied to `max_results` on relaxation attempts.
 const RELAXATION_MULTIPLIER: usize = 4;
 
+/// Result of a search with auto-relaxation.
+#[derive(Debug)]
+pub struct SearchOutcome {
+    /// The search results.
+    pub results: Vec<SearchResult>,
+    /// Whether auto-relaxation was applied to obtain results.
+    pub relaxation_applied: bool,
+}
+
 /// Performs search with auto-relaxation.
 ///
 /// If the initial search returns no results, progressively relaxes the
@@ -31,22 +40,32 @@ pub fn search_with_relaxation(
     query: &str,
     max_results: usize,
     intent: Option<Intent>,
-) -> Result<Vec<SearchResult>> {
+) -> Result<SearchOutcome> {
     // Try normal search first.
     let results = search::hybrid_search(conn, graph, query, max_results, intent)?;
     if !results.is_empty() {
-        return Ok(results);
+        return Ok(SearchOutcome {
+            results,
+            relaxation_applied: false,
+        });
     }
 
     // Relaxation: try with a larger candidate pool.
     let relaxed_limit = max_results.saturating_mul(RELAXATION_MULTIPLIER);
     let results = search::hybrid_search(conn, graph, query, relaxed_limit, intent)?;
     if !results.is_empty() {
-        return Ok(results.into_iter().take(max_results).collect());
+        return Ok(SearchOutcome {
+            results: results.into_iter().take(max_results).collect(),
+            relaxation_applied: true,
+        });
     }
 
     // Final fallback: pure FTS5 without hybrid scoring.
-    fts5_fallback(conn, query, max_results)
+    let results = fts5_fallback(conn, query, max_results)?;
+    Ok(SearchOutcome {
+        results,
+        relaxation_applied: true,
+    })
 }
 
 /// Pure FTS5 fallback search without hybrid scoring.
@@ -59,7 +78,7 @@ fn fts5_fallback(conn: &Connection, query: &str, max_results: usize) -> Result<V
         return Ok(Vec::new());
     }
 
-    #[allow(clippy::cast_possible_wrap)]
+    #[allow(clippy::cast_possible_wrap)] // small usize fits in i64
     let limit = max_results as i64;
 
     let mut stmt = conn
@@ -102,7 +121,13 @@ fn fts5_fallback(conn: &Connection, query: &str, max_results: usize) -> Result<V
             })
         })
         .context("execute FTS5 fallback query")?
-        .filter_map(Result::ok)
+        .filter_map(|r| match r {
+            Ok(val) => Some(val),
+            Err(e) => {
+                tracing::warn!("skipping corrupt row in FTS5 fallback: {e}");
+                None
+            }
+        })
         .collect();
 
     Ok(results)

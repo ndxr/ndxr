@@ -1,84 +1,8 @@
 //! Integration tests for the hybrid search pipeline.
 
-use std::fs;
+mod helpers;
 
 use tempfile::TempDir;
-
-// ---------------------------------------------------------------------------
-// Helper: create a multi-file TypeScript project for search tests.
-// ---------------------------------------------------------------------------
-
-fn create_search_project(tmp: &TempDir) {
-    fs::create_dir(tmp.path().join(".git")).unwrap();
-    fs::create_dir_all(tmp.path().join("src")).unwrap();
-
-    fs::write(
-        tmp.path().join("src/auth.ts"),
-        r"
-/** Validates authentication tokens */
-export function validateToken(token: string): boolean {
-    return token.length > 0;
-}
-
-/** Handles authentication errors */
-export function handleAuthError(error: Error): void {
-    console.error(error);
-}
-
-export class AuthService {
-    validate(token: string): boolean {
-        return validateToken(token);
-    }
-}
-",
-    )
-    .unwrap();
-
-    fs::write(
-        tmp.path().join("src/database.ts"),
-        r"
-/** Database connection manager */
-export class DatabaseConnection {
-    connect(url: string): void {}
-    query(sql: string): any[] { return []; }
-    disconnect(): void {}
-}
-
-export function createConnection(url: string): DatabaseConnection {
-    return new DatabaseConnection();
-}
-",
-    )
-    .unwrap();
-
-    fs::write(
-        tmp.path().join("src/middleware.ts"),
-        r"
-import { validateToken } from './auth';
-import { DatabaseConnection } from './database';
-
-export function authMiddleware(req: any): boolean {
-    return validateToken(req.token);
-}
-",
-    )
-    .unwrap();
-}
-
-fn index_and_build_graph(
-    tmp: &TempDir,
-) -> (
-    ndxr::config::NdxrConfig,
-    rusqlite::Connection,
-    ndxr::graph::builder::SymbolGraph,
-) {
-    let config = ndxr::config::NdxrConfig::from_workspace(tmp.path().canonicalize().unwrap());
-    ndxr::indexer::index(&config).unwrap();
-    let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
-    let graph = ndxr::graph::builder::build_graph(&conn).unwrap();
-    ndxr::graph::centrality::compute_and_store(&conn, &graph).unwrap();
-    (config, conn, graph)
-}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -87,8 +11,8 @@ fn index_and_build_graph(
 #[test]
 fn search_finds_auth_symbols() {
     let tmp = TempDir::new().unwrap();
-    create_search_project(&tmp);
-    let (_config, conn, graph) = index_and_build_graph(&tmp);
+    helpers::create_search_project(&tmp);
+    let (_config, conn, graph) = helpers::index_and_build(&tmp);
 
     let results =
         ndxr::graph::search::hybrid_search(&conn, &graph, "authentication", 10, None).unwrap();
@@ -103,8 +27,8 @@ fn search_finds_auth_symbols() {
 #[test]
 fn search_finds_database_symbols() {
     let tmp = TempDir::new().unwrap();
-    create_search_project(&tmp);
-    let (_config, conn, graph) = index_and_build_graph(&tmp);
+    helpers::create_search_project(&tmp);
+    let (_config, conn, graph) = helpers::index_and_build(&tmp);
 
     let results =
         ndxr::graph::search::hybrid_search(&conn, &graph, "database connection", 10, None).unwrap();
@@ -114,8 +38,8 @@ fn search_finds_database_symbols() {
 #[test]
 fn search_results_have_breakdown() {
     let tmp = TempDir::new().unwrap();
-    create_search_project(&tmp);
-    let (_config, conn, graph) = index_and_build_graph(&tmp);
+    helpers::create_search_project(&tmp);
+    let (_config, conn, graph) = helpers::index_and_build(&tmp);
 
     let results =
         ndxr::graph::search::hybrid_search(&conn, &graph, "validate token", 5, None).unwrap();
@@ -129,8 +53,8 @@ fn search_results_have_breakdown() {
 #[test]
 fn intent_affects_results() {
     let tmp = TempDir::new().unwrap();
-    create_search_project(&tmp);
-    let (_config, conn, graph) = index_and_build_graph(&tmp);
+    helpers::create_search_project(&tmp);
+    let (_config, conn, graph) = helpers::index_and_build(&tmp);
 
     let debug_results = ndxr::graph::search::hybrid_search(
         &conn,
@@ -160,8 +84,8 @@ fn intent_affects_results() {
 #[test]
 fn empty_query_returns_empty() {
     let tmp = TempDir::new().unwrap();
-    create_search_project(&tmp);
-    let (_config, conn, graph) = index_and_build_graph(&tmp);
+    helpers::create_search_project(&tmp);
+    let (_config, conn, graph) = helpers::index_and_build(&tmp);
 
     let results = ndxr::graph::search::hybrid_search(&conn, &graph, "", 10, None).unwrap();
     assert!(results.is_empty(), "empty query should return no results");
@@ -170,8 +94,8 @@ fn empty_query_returns_empty() {
 #[test]
 fn nonexistent_term_returns_empty() {
     let tmp = TempDir::new().unwrap();
-    create_search_project(&tmp);
-    let (_config, conn, graph) = index_and_build_graph(&tmp);
+    helpers::create_search_project(&tmp);
+    let (_config, conn, graph) = helpers::index_and_build(&tmp);
 
     let results =
         ndxr::graph::search::hybrid_search(&conn, &graph, "zzzznonexistentterm", 10, None).unwrap();
@@ -184,8 +108,8 @@ fn nonexistent_term_returns_empty() {
 #[test]
 fn search_with_special_characters_does_not_crash() {
     let tmp = TempDir::new().unwrap();
-    create_search_project(&tmp);
-    let (_config, conn, graph) = index_and_build_graph(&tmp);
+    helpers::create_search_project(&tmp);
+    let (_config, conn, graph) = helpers::index_and_build(&tmp);
 
     // These should all return Ok, not crash
     let queries = [

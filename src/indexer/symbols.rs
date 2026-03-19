@@ -59,6 +59,23 @@ pub fn extract_symbols(
     lang: &LanguageConfig,
 ) -> Result<Vec<ExtractedSymbol>> {
     let tree = parse_source(source, lang)?;
+    extract_symbols_from_tree(file_path, source, lang, &tree)
+}
+
+/// Extracts symbols from a pre-parsed tree-sitter AST.
+///
+/// This avoids re-parsing source code when the tree is already available (e.g.,
+/// when both symbols and edges are extracted from the same parse).
+///
+/// # Errors
+///
+/// Returns an error if the symbol query is invalid.
+pub fn extract_symbols_from_tree(
+    file_path: &str,
+    source: &str,
+    lang: &LanguageConfig,
+    tree: &tree_sitter::Tree,
+) -> Result<Vec<ExtractedSymbol>> {
     let root = tree.root_node();
     let ts_lang: tree_sitter::Language = lang.language.into();
     let query =
@@ -141,6 +158,23 @@ pub fn extract_edges(
     lang: &LanguageConfig,
 ) -> Result<Vec<ExtractedEdge>> {
     let tree = parse_source(source, lang)?;
+    extract_edges_from_tree(file_path, source, lang, &tree)
+}
+
+/// Extracts edges from a pre-parsed tree-sitter AST.
+///
+/// This avoids re-parsing source code when the tree is already available (e.g.,
+/// when both symbols and edges are extracted from the same parse).
+///
+/// # Errors
+///
+/// Returns an error if an import or call query is invalid.
+pub fn extract_edges_from_tree(
+    file_path: &str,
+    source: &str,
+    lang: &LanguageConfig,
+    tree: &tree_sitter::Tree,
+) -> Result<Vec<ExtractedEdge>> {
     let root = tree.root_node();
     let ts_lang: tree_sitter::Language = lang.language.into();
     let source_bytes = source.as_bytes();
@@ -255,8 +289,15 @@ fn extract_call_edges(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Parses source code with the given language config.
-fn parse_source(source: &str, lang: &LanguageConfig) -> Result<tree_sitter::Tree> {
+/// Parses source code into a tree-sitter AST using the given language config.
+///
+/// Creates a new `Parser` per call (tree-sitter parsers are cheap to create
+/// and are not `Send`, so per-thread creation is the intended usage pattern).
+///
+/// # Errors
+///
+/// Returns an error if the language cannot be set or parsing returns `None`.
+pub fn parse_source(source: &str, lang: &LanguageConfig) -> Result<tree_sitter::Tree> {
     let mut parser = Parser::new();
     let ts_lang: tree_sitter::Language = lang.language.into();
     parser

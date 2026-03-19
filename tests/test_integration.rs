@@ -310,7 +310,7 @@ export interface JwtPayload {
         ndxr::capsule::relaxation::search_with_relaxation(&conn, &graph, "authentication", 5, None)
             .unwrap();
     assert!(
-        !relaxed.is_empty(),
+        !relaxed.results.is_empty(),
         "relaxation should return at least one result"
     );
 

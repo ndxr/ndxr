@@ -177,7 +177,7 @@ pub fn get_session_observations(conn: &Connection, session_id: &str) -> Result<V
 /// # Errors
 ///
 /// Returns an error if the database query fails.
-#[allow(clippy::cast_possible_wrap)]
+#[allow(clippy::cast_possible_wrap)] // small usize fits in i64
 pub fn get_recent_sessions(
     conn: &Connection,
     count: usize,

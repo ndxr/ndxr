@@ -46,7 +46,11 @@ fn full_index_creates_symbols_and_edges() {
     let stats = ndxr::indexer::index(&config).unwrap();
 
     assert_eq!(stats.files_indexed, 2);
-    assert!(stats.symbols_extracted > 0);
+    assert!(
+        stats.symbols_extracted >= 2,
+        "should extract at least the 2 defined functions, got {}",
+        stats.symbols_extracted
+    );
 
     let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
     let file_count: i64 = conn
@@ -57,7 +61,10 @@ fn full_index_creates_symbols_and_edges() {
     let symbol_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM symbols", [], |row| row.get(0))
         .unwrap();
-    assert!(symbol_count >= 2, "at least main + greet expected");
+    assert_eq!(
+        symbol_count, 2,
+        "DB stores 2 unique symbols after INSERT OR IGNORE deduplication (main + greet)"
+    );
 }
 
 #[test]

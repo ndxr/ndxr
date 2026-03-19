@@ -11,6 +11,7 @@ pub mod languages;
 pub mod mcp;
 pub mod memory;
 pub mod skeleton;
+pub mod status;
 pub mod storage;
 pub mod util;
 pub mod watcher;

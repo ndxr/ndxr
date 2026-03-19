@@ -3,9 +3,45 @@
 pub mod builder;
 pub mod relaxation;
 
+use std::fmt;
+
 use serde::Serialize;
 
 use crate::graph::scoring::ScoreBreakdown;
+
+/// Blast radius classification for impact analysis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BlastRadius {
+    /// 0-4 transitive callers.
+    Low,
+    /// 5-20 transitive callers.
+    Medium,
+    /// More than 20 transitive callers.
+    High,
+}
+
+impl BlastRadius {
+    /// Classifies transitive caller count into a blast radius category.
+    #[must_use]
+    pub const fn from_caller_count(count: usize) -> Self {
+        match count {
+            0..=4 => Self::Low,
+            5..=20 => Self::Medium,
+            _ => Self::High,
+        }
+    }
+}
+
+impl fmt::Display for BlastRadius {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Low => f.write_str("low"),
+            Self::Medium => f.write_str("medium"),
+            Self::High => f.write_str("high"),
+        }
+    }
+}
 
 /// A pivot file containing full source code.
 #[derive(Debug, Clone, Serialize)]
@@ -72,8 +108,8 @@ pub struct ImpactHint {
     pub callers: usize,
     /// Number of direct callees (out-degree).
     pub callees: usize,
-    /// Blast radius category: "low", "medium", or "high".
-    pub blast_radius: String,
+    /// Blast radius category.
+    pub blast_radius: BlastRadius,
 }
 
 /// Statistics about the capsule construction.

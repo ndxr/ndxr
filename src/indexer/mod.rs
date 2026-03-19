@@ -16,7 +16,7 @@ pub mod symbols;
 pub mod tokenizer;
 pub mod walker;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -29,6 +29,7 @@ use crate::config::NdxrConfig;
 use crate::graph;
 use crate::memory;
 use crate::storage;
+use crate::storage::db::BATCH_PARAM_LIMIT;
 
 /// Statistics returned after an indexing operation.
 #[derive(Debug, Default)]
@@ -81,21 +82,26 @@ pub fn index(config: &NdxrConfig) -> Result<IndexStats> {
     // 2. Walk filesystem.
     let files = walker::walk_workspace(&config.workspace_root)?;
 
-    // 3. Hash all files in parallel and diff against DB.
-    let current_files: Vec<(PathBuf, String)> = files
+    // 3. Read and hash all files in parallel, then diff against DB.
+    let current_files: Vec<(PathBuf, String, String)> = files
         .par_iter()
         .filter_map(|abs_path| {
             let rel_path = abs_path.strip_prefix(&config.workspace_root).ok()?;
-            let content = std::fs::read(abs_path).ok()?;
-            let hash = blake3::hash(&content).to_hex().to_string();
-            Some((rel_path.to_path_buf(), hash))
+            let bytes = std::fs::read(abs_path).ok()?;
+            let hash = blake3::hash(&bytes).to_hex().to_string();
+            let source = String::from_utf8(bytes).ok()?;
+            Some((rel_path.to_path_buf(), source, hash))
         })
         .collect();
 
-    let diff = manifest::diff_files(&conn, &current_files)?;
+    let manifest_entries: Vec<(PathBuf, String)> = current_files
+        .iter()
+        .map(|(path, _, hash)| (path.clone(), hash.clone()))
+        .collect();
+    let diff = manifest::diff_files(&conn, &manifest_entries)?;
 
-    // 4. Collect files to process.
-    let to_parse: Vec<PathBuf> = diff
+    // 4. Collect files to process, retaining their pre-read content.
+    let changed_paths: std::collections::HashSet<PathBuf> = diff
         .iter()
         .filter(|(_, status)| {
             matches!(
@@ -103,7 +109,17 @@ pub fn index(config: &NdxrConfig) -> Result<IndexStats> {
                 manifest::FileStatus::Added | manifest::FileStatus::Changed { .. }
             )
         })
-        .map(|(path, _)| config.workspace_root.join(path))
+        .map(|(path, _)| path.clone())
+        .collect();
+
+    let to_parse: Vec<parser::PreReadFile> = current_files
+        .into_iter()
+        .filter(|(path, _, _)| changed_paths.contains(path))
+        .map(|(rel_path, source, hash)| parser::PreReadFile {
+            abs_path: config.workspace_root.join(&rel_path),
+            source,
+            blake3_hash: hash,
+        })
         .collect();
 
     let deleted: Vec<PathBuf> = diff
@@ -117,8 +133,8 @@ pub fn index(config: &NdxrConfig) -> Result<IndexStats> {
         .filter(|(_, s)| matches!(s, manifest::FileStatus::Unchanged))
         .count();
 
-    // 5. Parse files in parallel.
-    let results = parser::parse_files_parallel(&config.workspace_root, &to_parse);
+    // 5. Parse files in parallel using pre-read content.
+    let results = parser::parse_files_parallel_from_content(&config.workspace_root, to_parse);
     stats.files_indexed = results.len();
 
     // 5b. Snapshot existing symbol signatures/body hashes before the write
@@ -180,8 +196,8 @@ pub fn index_paths(config: &NdxrConfig, changed_paths: &[PathBuf]) -> Result<Ind
 
     let conn = storage::db::open_or_create(&config.db_path)?;
 
-    // Partition into existing files and deleted files.
-    let mut existing: Vec<(PathBuf, String)> = Vec::new();
+    // Partition into existing files (with content) and deleted files.
+    let mut existing: Vec<(PathBuf, String, String)> = Vec::new();
     let mut deleted_rel: Vec<PathBuf> = Vec::new();
 
     for abs_path in changed_paths {
@@ -191,9 +207,11 @@ pub fn index_paths(config: &NdxrConfig, changed_paths: &[PathBuf]) -> Result<Ind
         };
 
         if abs_path.is_file() {
-            if let Ok(content) = std::fs::read(abs_path) {
-                let hash = blake3::hash(&content).to_hex().to_string();
-                existing.push((rel_path, hash));
+            if let Ok(bytes) = std::fs::read(abs_path) {
+                let hash = blake3::hash(&bytes).to_hex().to_string();
+                if let Ok(source) = String::from_utf8(bytes) {
+                    existing.push((rel_path, source, hash));
+                }
             }
         } else {
             // File no longer exists — treat as deletion.
@@ -202,9 +220,13 @@ pub fn index_paths(config: &NdxrConfig, changed_paths: &[PathBuf]) -> Result<Ind
     }
 
     // Diff only these files against the manifest.
-    let diff = manifest::diff_files(&conn, &existing)?;
+    let manifest_entries: Vec<(PathBuf, String)> = existing
+        .iter()
+        .map(|(path, _, hash)| (path.clone(), hash.clone()))
+        .collect();
+    let diff = manifest::diff_files(&conn, &manifest_entries)?;
 
-    let to_parse: Vec<PathBuf> = diff
+    let changed_paths_set: HashSet<PathBuf> = diff
         .iter()
         .filter(|(_, status)| {
             matches!(
@@ -212,7 +234,17 @@ pub fn index_paths(config: &NdxrConfig, changed_paths: &[PathBuf]) -> Result<Ind
                 manifest::FileStatus::Added | manifest::FileStatus::Changed { .. }
             )
         })
-        .map(|(path, _)| config.workspace_root.join(path))
+        .map(|(path, _)| path.clone())
+        .collect();
+
+    let to_parse: Vec<parser::PreReadFile> = existing
+        .into_iter()
+        .filter(|(path, _, _)| changed_paths_set.contains(path))
+        .map(|(rel_path, source, hash)| parser::PreReadFile {
+            abs_path: config.workspace_root.join(&rel_path),
+            source,
+            blake3_hash: hash,
+        })
         .collect();
 
     // Add explicitly deleted files that diff_files wouldn't have caught
@@ -229,7 +261,7 @@ pub fn index_paths(config: &NdxrConfig, changed_paths: &[PathBuf]) -> Result<Ind
         .filter(|(_, s)| matches!(s, manifest::FileStatus::Unchanged))
         .count();
 
-    let results = parser::parse_files_parallel(&config.workspace_root, &to_parse);
+    let results = parser::parse_files_parallel_from_content(&config.workspace_root, to_parse);
     stats.files_indexed = results.len();
 
     let pre_index_symbols = snapshot_symbol_hashes(&conn, &results, &all_deleted)?;
@@ -319,6 +351,9 @@ fn write_index_results(
         .try_into()
         .context("Unix timestamp exceeds i64 range")?;
 
+    // Combined FQN->ID map across all files for TF-IDF computation.
+    let mut all_fqn_to_id: HashMap<String, i64> = HashMap::new();
+
     // Insert new/changed files and their symbols/edges.
     for result in results {
         let rel_path = crate::util::normalize_path(&result.path);
@@ -379,10 +414,12 @@ fn write_index_results(
             .context("insert edge")?;
             stats.edges_extracted += 1;
         }
+
+        all_fqn_to_id.extend(fqn_to_id.drain());
     }
 
     // Compute TF-IDF term frequencies for newly inserted symbols.
-    compute_tfidf(&tx, results)?;
+    compute_tfidf(&tx, results, &all_fqn_to_id)?;
 
     tx.commit().context("commit index transaction")?;
     Ok(())
@@ -391,14 +428,18 @@ fn write_index_results(
 /// Computes TF-IDF term frequencies for all symbols in the given parse results.
 ///
 /// For each symbol:
-/// 1. Looks up the symbol ID by FQN and start line
+/// 1. Resolves the symbol ID from the pre-built `fqn_to_id` map
 /// 2. Tokenizes the symbol (name + docstring + FQN)
 /// 3. Computes the TF vector
 /// 4. Inserts into `term_frequencies`
 ///
 /// After all symbols are processed, recomputes the global `doc_frequencies`
 /// table from the full `term_frequencies` table.
-fn compute_tfidf(tx: &rusqlite::Transaction<'_>, results: &[parser::ParseResult]) -> Result<()> {
+fn compute_tfidf(
+    tx: &rusqlite::Transaction<'_>,
+    results: &[parser::ParseResult],
+    fqn_to_id: &HashMap<String, i64>,
+) -> Result<()> {
     // Delete old doc_frequencies (will recompute from scratch).
     tx.execute("DELETE FROM doc_frequencies", [])
         .context("clear doc_frequencies")?;
@@ -406,26 +447,19 @@ fn compute_tfidf(tx: &rusqlite::Transaction<'_>, results: &[parser::ParseResult]
     // For each result's symbols, insert term frequencies.
     for result in results {
         for sym in &result.symbols {
-            let sym_id: Option<i64> = tx
-                .query_row(
-                    "SELECT id FROM symbols WHERE fqn = ?1 AND start_line = ?2",
-                    params![sym.fqn, i64::try_from(sym.start_line).unwrap_or(i64::MAX)],
-                    |row| row.get(0),
-                )
-                .ok();
+            let Some(&sym_id) = fqn_to_id.get(&sym.fqn) else {
+                continue;
+            };
 
-            if let Some(sym_id) = sym_id {
-                let tokens =
-                    tokenizer::tokenize_symbol(&sym.name, sym.docstring.as_deref(), &sym.fqn);
-                let tf = tokenizer::compute_tf(&tokens);
-                for (term, freq) in &tf {
-                    tx.execute(
-                        "INSERT OR REPLACE INTO term_frequencies (term, symbol_id, tf) \
-                         VALUES (?1, ?2, ?3)",
-                        params![term, sym_id, freq],
-                    )
-                    .context("insert term frequency")?;
-                }
+            let tokens = tokenizer::tokenize_symbol(&sym.name, sym.docstring.as_deref(), &sym.fqn);
+            let tf = tokenizer::compute_tf(&tokens);
+            for (term, freq) in &tf {
+                tx.execute(
+                    "INSERT OR REPLACE INTO term_frequencies (term, symbol_id, tf) \
+                     VALUES (?1, ?2, ?3)",
+                    params![term, sym_id, freq],
+                )
+                .context("insert term frequency")?;
             }
         }
     }
@@ -458,48 +492,72 @@ fn snapshot_symbol_hashes(
 ) -> Result<SymbolSnapshot> {
     let mut snapshot = SymbolSnapshot::new();
 
-    // Collect FQNs from parse results (changed/new files).
-    for result in results {
-        for sym in &result.symbols {
-            let row: rusqlite::Result<(Option<String>, Option<String>)> = conn.query_row(
-                "SELECT signature, body_hash FROM symbols WHERE fqn = ?1",
-                params![sym.fqn],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            );
-            match row {
-                Ok(hashes) => {
-                    snapshot.insert(sym.fqn.clone(), hashes);
-                }
-                Err(rusqlite::Error::QueryReturnedNoRows) => {}
-                Err(e) => {
-                    return Err(e)
-                        .with_context(|| format!("snapshot symbol hash for: {}", sym.fqn));
-                }
-            }
-        }
-    }
+    // Collect unique FQNs from parse results (changed/new files).
+    let fqn_set: HashSet<&str> = results
+        .iter()
+        .flat_map(|r| r.symbols.iter().map(|s| s.fqn.as_str()))
+        .collect();
+    let fqns: Vec<&str> = fqn_set.into_iter().collect();
 
-    // Collect FQNs from deleted files.
-    for path in deleted {
-        let rel_path = crate::util::normalize_path(path);
-        let mut stmt = conn
-            .prepare(
-                "SELECT s.fqn, s.signature, s.body_hash FROM symbols s \
-                 JOIN files f ON s.file_id = f.id WHERE f.path = ?1",
-            )
-            .with_context(|| format!("prepare snapshot for deleted file: {rel_path}"))?;
+    // Batch-query FQNs in chunks to stay under SQLite's variable limit.
+    for chunk in fqns.chunks(BATCH_PARAM_LIMIT) {
+        let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "SELECT fqn, signature, body_hash FROM symbols WHERE fqn IN ({})",
+            placeholders.join(", ")
+        );
+
+        let mut stmt = conn.prepare(&sql).context("prepare snapshot batch query")?;
+        let params: Vec<&dyn rusqlite::types::ToSql> = chunk
+            .iter()
+            .map(|f| f as &dyn rusqlite::types::ToSql)
+            .collect();
         let rows = stmt
-            .query_map(params![rel_path], |row| {
+            .query_map(params.as_slice(), |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, Option<String>>(1)?,
                     row.get::<_, Option<String>>(2)?,
                 ))
             })
-            .with_context(|| format!("query snapshot for deleted file: {rel_path}"))?;
+            .context("query snapshot batch")?;
+
         for row in rows {
-            let (fqn, sig, body) =
-                row.with_context(|| format!("read snapshot row for: {rel_path}"))?;
+            let (fqn, sig, body) = row.context("read snapshot batch row")?;
+            snapshot.insert(fqn, (sig, body));
+        }
+    }
+
+    // Batch-query FQNs from deleted files in chunks.
+    let deleted_paths: Vec<String> = deleted
+        .iter()
+        .map(|p| crate::util::normalize_path(p))
+        .collect();
+    for chunk in deleted_paths.chunks(BATCH_PARAM_LIMIT) {
+        let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "SELECT s.fqn, s.signature, s.body_hash FROM symbols s \
+             JOIN files f ON s.file_id = f.id WHERE f.path IN ({})",
+            placeholders.join(", ")
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .context("prepare snapshot batch query for deleted files")?;
+        let params: Vec<&dyn rusqlite::types::ToSql> = chunk
+            .iter()
+            .map(|p| p as &dyn rusqlite::types::ToSql)
+            .collect();
+        let rows = stmt
+            .query_map(params.as_slice(), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .context("query snapshot batch for deleted files")?;
+        for row in rows {
+            let (fqn, sig, body) = row.context("read snapshot row for deleted file")?;
             snapshot.insert(fqn, (sig, body));
         }
     }
@@ -519,17 +577,60 @@ fn detect_changed_symbols(
 ) -> Vec<memory::staleness::ChangedSymbol> {
     let mut changed = Vec::new();
 
-    // Check each FQN that existed before indexing.
-    for (fqn, (old_sig, old_body)) in pre_snapshot {
-        let post: Option<(Option<String>, Option<String>)> = conn
-            .query_row(
-                "SELECT signature, body_hash FROM symbols WHERE fqn = ?1",
-                params![fqn],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .ok();
+    if pre_snapshot.is_empty() {
+        return changed;
+    }
 
-        match post {
+    // Batch-query all FQNs from the pre-snapshot to get post-index state.
+    let fqns: Vec<&str> = pre_snapshot.keys().map(String::as_str).collect();
+    let mut post_state: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+
+    for chunk in fqns.chunks(BATCH_PARAM_LIMIT) {
+        let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "SELECT fqn, signature, body_hash FROM symbols WHERE fqn IN ({})",
+            placeholders.join(", ")
+        );
+
+        let params: Vec<&dyn rusqlite::types::ToSql> = chunk
+            .iter()
+            .map(|f| f as &dyn rusqlite::types::ToSql)
+            .collect();
+
+        let Ok(mut stmt) = conn.prepare(&sql) else {
+            tracing::warn!("failed to prepare staleness batch query");
+            return changed;
+        };
+
+        let rows = match stmt.query_map(params.as_slice(), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        }) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("staleness batch query failed: {e}");
+                return changed;
+            }
+        };
+
+        for row in rows {
+            match row {
+                Ok((fqn, sig, body)) => {
+                    post_state.insert(fqn, (sig, body));
+                }
+                Err(e) => {
+                    tracing::warn!("staleness batch row read failed: {e}");
+                }
+            }
+        }
+    }
+
+    // Diff pre-snapshot against post-index state.
+    for (fqn, (old_sig, old_body)) in pre_snapshot {
+        match post_state.get(fqn) {
             None => {
                 // Symbol was deleted.
                 changed.push(memory::staleness::ChangedSymbol {
@@ -538,12 +639,12 @@ fn detect_changed_symbols(
                 });
             }
             Some((new_sig, new_body)) => {
-                if *old_sig != new_sig {
+                if *old_sig != *new_sig {
                     changed.push(memory::staleness::ChangedSymbol {
                         fqn: fqn.clone(),
                         change_type: memory::staleness::SymbolChange::SignatureChanged,
                     });
-                } else if *old_body != new_body {
+                } else if *old_body != *new_body {
                     changed.push(memory::staleness::ChangedSymbol {
                         fqn: fqn.clone(),
                         change_type: memory::staleness::SymbolChange::BodyChanged,
@@ -552,11 +653,6 @@ fn detect_changed_symbols(
             }
         }
     }
-
-    // Also flag newly parsed symbols whose FQNs were not in the pre-snapshot
-    // but that we detect as re-indexed (changed files). These are captured by
-    // the `Changed` diff status for the file, and the FQN existed before.
-    // We already handled these above via pre_snapshot.
 
     changed
 }

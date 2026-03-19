@@ -1,74 +1,10 @@
 //! Integration tests for the capsule builder and auto-relaxation.
 
+mod helpers;
+
 use std::collections::HashSet;
-use std::fs;
 
 use tempfile::TempDir;
-
-// ---------------------------------------------------------------------------
-// Helper: create a multi-file TypeScript project for capsule tests.
-// ---------------------------------------------------------------------------
-
-fn create_capsule_project(tmp: &TempDir) {
-    fs::create_dir(tmp.path().join(".git")).unwrap();
-    fs::create_dir_all(tmp.path().join("src")).unwrap();
-
-    fs::write(
-        tmp.path().join("src/auth.ts"),
-        r"
-/** Validates authentication tokens */
-export function validateToken(token: string): boolean {
-    return token.length > 0;
-}
-
-export class AuthService {
-    validate(token: string): boolean {
-        return validateToken(token);
-    }
-}
-",
-    )
-    .unwrap();
-
-    fs::write(
-        tmp.path().join("src/middleware.ts"),
-        r"
-import { validateToken } from './auth';
-
-export function authMiddleware(req: any): boolean {
-    return validateToken(req.token);
-}
-",
-    )
-    .unwrap();
-
-    fs::write(
-        tmp.path().join("src/routes.ts"),
-        r"
-import { authMiddleware } from './middleware';
-
-export function setupRoutes(app: any): void {
-    app.use(authMiddleware);
-}
-",
-    )
-    .unwrap();
-}
-
-fn index_and_build(
-    tmp: &TempDir,
-) -> (
-    ndxr::config::NdxrConfig,
-    rusqlite::Connection,
-    ndxr::graph::builder::SymbolGraph,
-) {
-    let config = ndxr::config::NdxrConfig::from_workspace(tmp.path().canonicalize().unwrap());
-    ndxr::indexer::index(&config).unwrap();
-    let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
-    let graph = ndxr::graph::builder::build_graph(&conn).unwrap();
-    ndxr::graph::centrality::compute_and_store(&conn, &graph).unwrap();
-    (config, conn, graph)
-}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -77,9 +13,9 @@ fn index_and_build(
 #[test]
 fn capsule_respects_token_budget() {
     let tmp = TempDir::new().unwrap();
-    create_capsule_project(&tmp);
+    helpers::create_capsule_project(&tmp);
 
-    let (config, conn, graph) = index_and_build(&tmp);
+    let (config, conn, graph) = helpers::index_and_build(&tmp);
 
     let results = ndxr::graph::search::hybrid_search(&conn, &graph, "auth", 10, None).unwrap();
     let estimator = ndxr::config::TokenEstimator::default();
@@ -101,9 +37,9 @@ fn capsule_respects_token_budget() {
 #[test]
 fn capsule_no_file_in_both_pivots_and_skeletons() {
     let tmp = TempDir::new().unwrap();
-    create_capsule_project(&tmp);
+    helpers::create_capsule_project(&tmp);
 
-    let (config, conn, graph) = index_and_build(&tmp);
+    let (config, conn, graph) = helpers::index_and_build(&tmp);
 
     let results = ndxr::graph::search::hybrid_search(&conn, &graph, "validate", 10, None).unwrap();
     let estimator = ndxr::config::TokenEstimator::default();
@@ -132,9 +68,9 @@ fn capsule_no_file_in_both_pivots_and_skeletons() {
 #[test]
 fn capsule_pivots_contain_file_content() {
     let tmp = TempDir::new().unwrap();
-    create_capsule_project(&tmp);
+    helpers::create_capsule_project(&tmp);
 
-    let (config, conn, graph) = index_and_build(&tmp);
+    let (config, conn, graph) = helpers::index_and_build(&tmp);
 
     let results = ndxr::graph::search::hybrid_search(&conn, &graph, "auth", 10, None).unwrap();
     let estimator = ndxr::config::TokenEstimator::default();
@@ -162,28 +98,33 @@ fn capsule_pivots_contain_file_content() {
 #[test]
 fn relaxation_returns_results_for_any_query() {
     let tmp = TempDir::new().unwrap();
-    create_capsule_project(&tmp);
+    helpers::create_capsule_project(&tmp);
 
-    let (_config, conn, graph) = index_and_build(&tmp);
+    let (_config, conn, graph) = helpers::index_and_build(&tmp);
 
-    let results =
+    let outcome =
         ndxr::capsule::relaxation::search_with_relaxation(&conn, &graph, "validate", 5, None)
             .unwrap();
-    assert!(!results.is_empty());
+    assert!(!outcome.results.is_empty());
 }
 
 #[test]
 fn impact_hints_generated() {
     let tmp = TempDir::new().unwrap();
-    create_capsule_project(&tmp);
+    helpers::create_capsule_project(&tmp);
 
-    let (_config, conn, graph) = index_and_build(&tmp);
+    let (_config, conn, graph) = helpers::index_and_build(&tmp);
 
     let results = ndxr::graph::search::hybrid_search(&conn, &graph, "validate", 5, None).unwrap();
     let hints = ndxr::capsule::builder::generate_impact_hints(&graph, &results);
     for hint in &hints {
         assert!(
-            ["low", "medium", "high"].contains(&hint.blast_radius.as_str()),
+            matches!(
+                hint.blast_radius,
+                ndxr::capsule::BlastRadius::Low
+                    | ndxr::capsule::BlastRadius::Medium
+                    | ndxr::capsule::BlastRadius::High
+            ),
             "unexpected blast_radius: {}",
             hint.blast_radius
         );
@@ -193,9 +134,9 @@ fn impact_hints_generated() {
 #[test]
 fn capsule_with_empty_search_results() {
     let tmp = TempDir::new().unwrap();
-    create_capsule_project(&tmp);
+    helpers::create_capsule_project(&tmp);
 
-    let (config, conn, graph) = index_and_build(&tmp);
+    let (config, conn, graph) = helpers::index_and_build(&tmp);
     let estimator = ndxr::config::TokenEstimator::default();
 
     // Build capsule with empty search results -- should not crash

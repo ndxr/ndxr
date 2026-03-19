@@ -1,84 +1,8 @@
 //! Smoke tests: search, graph, and scoring edge cases.
 
-use std::fs;
+mod helpers;
 
 use tempfile::TempDir;
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn create_search_project(tmp: &TempDir) {
-    fs::create_dir(tmp.path().join(".git")).unwrap();
-    fs::create_dir_all(tmp.path().join("src")).unwrap();
-
-    fs::write(
-        tmp.path().join("src/auth.ts"),
-        r"
-/** Validates authentication tokens */
-export function validateToken(token: string): boolean {
-    return token.length > 0;
-}
-
-/** Handles authentication errors */
-export function handleAuthError(error: Error): void {
-    console.error(error);
-}
-
-export class AuthService {
-    validate(token: string): boolean {
-        return validateToken(token);
-    }
-}
-",
-    )
-    .unwrap();
-
-    fs::write(
-        tmp.path().join("src/database.ts"),
-        r"
-/** Database connection manager */
-export class DatabaseConnection {
-    connect(url: string): void {}
-    query(sql: string): any[] { return []; }
-    disconnect(): void {}
-}
-
-export function createConnection(url: string): DatabaseConnection {
-    return new DatabaseConnection();
-}
-",
-    )
-    .unwrap();
-
-    fs::write(
-        tmp.path().join("src/middleware.ts"),
-        r"
-import { validateToken } from './auth';
-import { DatabaseConnection } from './database';
-
-export function authMiddleware(req: any): boolean {
-    return validateToken(req.token);
-}
-",
-    )
-    .unwrap();
-}
-
-fn index_and_build_graph(
-    tmp: &TempDir,
-) -> (
-    ndxr::config::NdxrConfig,
-    rusqlite::Connection,
-    ndxr::graph::builder::SymbolGraph,
-) {
-    let config = ndxr::config::NdxrConfig::from_workspace(tmp.path().canonicalize().unwrap());
-    ndxr::indexer::index(&config).unwrap();
-    let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
-    let graph = ndxr::graph::builder::build_graph(&conn).unwrap();
-    ndxr::graph::centrality::compute_and_store(&conn, &graph).unwrap();
-    (config, conn, graph)
-}
 
 // ---------------------------------------------------------------------------
 // Search edge-case tests
@@ -87,8 +11,8 @@ fn index_and_build_graph(
 #[test]
 fn search_unicode_query_does_not_crash() {
     let tmp = TempDir::new().unwrap();
-    create_search_project(&tmp);
-    let (_config, conn, graph) = index_and_build_graph(&tmp);
+    helpers::create_search_project(&tmp);
+    let (_config, conn, graph) = helpers::index_and_build(&tmp);
 
     let unicode_queries = [
         "cafe\u{0301} authentication \u{8BA4}\u{8BC1} \u{1F512}",
@@ -109,8 +33,8 @@ fn search_unicode_query_does_not_crash() {
 #[test]
 fn search_very_long_query() {
     let tmp = TempDir::new().unwrap();
-    create_search_project(&tmp);
-    let (_config, conn, graph) = index_and_build_graph(&tmp);
+    helpers::create_search_project(&tmp);
+    let (_config, conn, graph) = helpers::index_and_build(&tmp);
 
     let long_query = "authentication ".repeat(667); // ~10,005 characters
     assert!(
@@ -133,8 +57,8 @@ fn search_very_long_query() {
 #[test]
 fn search_whitespace_only_returns_empty() {
     let tmp = TempDir::new().unwrap();
-    create_search_project(&tmp);
-    let (_config, conn, graph) = index_and_build_graph(&tmp);
+    helpers::create_search_project(&tmp);
+    let (_config, conn, graph) = helpers::index_and_build(&tmp);
 
     let results = ndxr::graph::search::hybrid_search(&conn, &graph, "   \t\n  ", 10, None).unwrap();
     assert!(
@@ -147,8 +71,8 @@ fn search_whitespace_only_returns_empty() {
 #[test]
 fn search_newlines_and_tabs_in_query() {
     let tmp = TempDir::new().unwrap();
-    create_search_project(&tmp);
-    let (_config, conn, graph) = index_and_build_graph(&tmp);
+    helpers::create_search_project(&tmp);
+    let (_config, conn, graph) = helpers::index_and_build(&tmp);
 
     let result =
         ndxr::graph::search::hybrid_search(&conn, &graph, "auth\nvalidate\ttoken", 10, None);
@@ -177,8 +101,8 @@ fn search_newlines_and_tabs_in_query() {
 #[test]
 fn search_max_results_zero_returns_empty() {
     let tmp = TempDir::new().unwrap();
-    create_search_project(&tmp);
-    let (_config, conn, graph) = index_and_build_graph(&tmp);
+    helpers::create_search_project(&tmp);
+    let (_config, conn, graph) = helpers::index_and_build(&tmp);
 
     let results =
         ndxr::graph::search::hybrid_search(&conn, &graph, "authentication", 0, None).unwrap();
@@ -192,8 +116,8 @@ fn search_max_results_zero_returns_empty() {
 #[test]
 fn search_max_results_exceeds_candidates() {
     let tmp = TempDir::new().unwrap();
-    create_search_project(&tmp);
-    let (_config, conn, graph) = index_and_build_graph(&tmp);
+    helpers::create_search_project(&tmp);
+    let (_config, conn, graph) = helpers::index_and_build(&tmp);
 
     let normal_results =
         ndxr::graph::search::hybrid_search(&conn, &graph, "auth", 10, None).unwrap();
@@ -219,8 +143,8 @@ fn search_max_results_exceeds_candidates() {
 #[test]
 fn search_all_intents_produce_results() {
     let tmp = TempDir::new().unwrap();
-    create_search_project(&tmp);
-    let (_config, conn, graph) = index_and_build_graph(&tmp);
+    helpers::create_search_project(&tmp);
+    let (_config, conn, graph) = helpers::index_and_build(&tmp);
 
     let intents = [
         (ndxr::graph::intent::Intent::Debug, "debug"),
@@ -288,11 +212,11 @@ fn search_intent_detection_substring_behavior() {
 #[test]
 fn search_with_relaxation_for_gibberish() {
     let tmp = TempDir::new().unwrap();
-    create_search_project(&tmp);
-    let (_config, conn, graph) = index_and_build_graph(&tmp);
+    helpers::create_search_project(&tmp);
+    let (_config, conn, graph) = helpers::index_and_build(&tmp);
 
     // Gibberish query: no direct FTS5 match expected.
-    let results = ndxr::capsule::relaxation::search_with_relaxation(
+    let outcome = ndxr::capsule::relaxation::search_with_relaxation(
         &conn,
         &graph,
         "xyzzy_nonexistent",
@@ -306,7 +230,7 @@ fn search_with_relaxation_for_gibberish() {
     // assertion is that it does not crash. Since our terms are truly
     // gibberish, FTS5 fallback will also find nothing.
     // We verify the function completes successfully.
-    for r in &results {
+    for r in &outcome.results {
         assert!(r.score >= 0.0, "scores should be non-negative");
     }
 }

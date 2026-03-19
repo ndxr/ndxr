@@ -5,7 +5,6 @@
 //! code for the highest-scoring results, while skeleton files provide
 //! signature-only context for adjacent symbols discovered via BFS.
 
-use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 
@@ -14,12 +13,13 @@ use petgraph::Direction;
 use petgraph::graph::NodeIndex;
 use rusqlite::Connection;
 
-use super::{Capsule, CapsuleStats, ImpactHint, PivotFile, PivotSymbol, SkeletonFile};
+use super::{BlastRadius, Capsule, CapsuleStats, ImpactHint, PivotFile, PivotSymbol, SkeletonFile};
 use crate::config::TokenEstimator;
 use crate::graph::builder::SymbolGraph;
 use crate::graph::intent::Intent;
 use crate::graph::search::SearchResult;
 use crate::skeleton::reducer;
+use crate::storage::db::BATCH_PARAM_LIMIT;
 
 /// Maximum memory token budget (hard cap).
 const MAX_MEMORY_TOKENS: f64 = 500.0;
@@ -81,7 +81,7 @@ pub struct CapsuleRequest<'a> {
     clippy::cast_precision_loss
 )]
 pub fn build_capsule(req: &CapsuleRequest<'_>) -> Result<Capsule> {
-    let intent_name = format!("{:?}", req.intent).to_lowercase();
+    let intent_name = req.intent.name().to_owned();
 
     // 1. Budget allocation.
     let memory_budget =
@@ -90,17 +90,25 @@ pub fn build_capsule(req: &CapsuleRequest<'_>) -> Result<Capsule> {
     let pivot_budget = (remaining as f64 * PIVOT_FRACTION) as usize;
     let skeleton_budget = remaining.saturating_sub(pivot_budget);
 
-    // 2. Build pivot files.
-    let (pivots, pivot_files_set, tokens_pivots) = build_pivots(req, pivot_budget);
+    // 2. Cache the canonical workspace root (avoids re-canonicalizing per file).
+    let canonical_root = req.workspace_root.canonicalize().with_context(|| {
+        format!(
+            "cannot resolve workspace root: {}",
+            req.workspace_root.display()
+        )
+    })?;
 
-    // 3. BFS expansion and skeleton construction.
+    // 3. Build pivot files.
+    let (pivots, pivot_files_set, tokens_pivots) = build_pivots(req, pivot_budget, &canonical_root);
+
+    // 4. BFS expansion and skeleton construction.
     let (skeletons, tokens_skeletons) = build_skeletons(
         req,
         &pivot_files_set,
         skeleton_budget + pivot_budget.saturating_sub(tokens_pivots),
     )?;
 
-    // 4. Assemble capsule.
+    // 5. Assemble capsule.
     let stats = CapsuleStats {
         tokens_used: tokens_pivots + tokens_skeletons,
         tokens_budget: req.token_budget,
@@ -136,6 +144,7 @@ pub fn build_capsule(req: &CapsuleRequest<'_>) -> Result<Capsule> {
 fn build_pivots(
     req: &CapsuleRequest<'_>,
     pivot_budget: usize,
+    canonical_root: &Path,
 ) -> (Vec<PivotFile>, HashSet<String>, usize) {
     // Group search results by file path.
     let mut file_symbols: HashMap<String, Vec<&SearchResult>> = HashMap::new();
@@ -157,7 +166,7 @@ fn build_pivots(
             b.1.iter()
                 .map(|s| s.score)
                 .fold(f64::NEG_INFINITY, f64::max);
-        score_b.partial_cmp(&score_a).unwrap_or(Ordering::Equal)
+        score_b.total_cmp(&score_a)
     });
 
     let mut pivots = Vec::new();
@@ -165,7 +174,7 @@ fn build_pivots(
     let mut tokens_used = 0;
 
     for (file_path, syms) in &files_by_score {
-        let Ok(content) = read_file_content(req.workspace_root, file_path) else {
+        let Ok(content) = read_file_content(req.workspace_root, canonical_root, file_path) else {
             continue;
         };
         let file_tokens = req.estimator.estimate(&content);
@@ -213,35 +222,36 @@ fn build_skeletons(
 
     let adjacent = bfs_expand(req.graph, &pivot_nodes, BFS_MAX_DEPTH);
 
-    // Collect adjacent symbols grouped by file.
+    // Collect all symbol IDs from BFS results for a single batch query.
+    let sym_entries: Vec<(i64, usize)> = adjacent
+        .iter()
+        .filter_map(|(node_idx, depth)| req.graph.node_to_id.get(node_idx).map(|&id| (id, *depth)))
+        .collect();
+    let sym_ids: Vec<i64> = sym_entries.iter().map(|(id, _)| *id).collect();
+    let id_to_depth: HashMap<i64, usize> = sym_entries.into_iter().collect();
+
+    // Batch-query file path and symbol name for all BFS neighbors.
+    let id_to_file_name = batch_load_symbol_file_names(req.conn, &sym_ids)?;
+
+    // Group adjacent symbols by file.
     let mut adjacent_by_file: HashMap<String, (Vec<String>, usize)> = HashMap::new();
     let mut file_order: Vec<String> = Vec::new();
+    let mut file_order_set: HashSet<String> = HashSet::new();
 
-    for (node_idx, depth) in &adjacent {
-        if let Some(&sym_id) = req.graph.node_to_id.get(node_idx) {
-            let file_and_name: Option<(String, String)> = req
-                .conn
-                .query_row(
-                    "SELECT f.path, s.name FROM symbols s \
-                     JOIN files f ON s.file_id = f.id WHERE s.id = ?1",
-                    [sym_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .ok();
-
-            if let Some((fp, name)) = file_and_name
-                && !pivot_paths.contains(&fp)
-            {
-                let entry = adjacent_by_file
-                    .entry(fp.clone())
-                    .or_insert_with(|| (Vec::new(), *depth));
-                entry.0.push(name);
-                if *depth < entry.1 {
-                    entry.1 = *depth;
-                }
-                if !file_order.contains(&fp) {
-                    file_order.push(fp);
-                }
+    for &sym_id in &sym_ids {
+        if let Some((fp, name)) = id_to_file_name.get(&sym_id)
+            && !pivot_paths.contains(fp)
+        {
+            let depth = id_to_depth.get(&sym_id).copied().unwrap_or(0);
+            let entry = adjacent_by_file
+                .entry(fp.clone())
+                .or_insert_with(|| (Vec::new(), depth));
+            entry.0.push(name.clone());
+            if depth < entry.1 {
+                entry.1 = depth;
+            }
+            if file_order_set.insert(fp.clone()) {
+                file_order.push(fp.clone());
             }
         }
     }
@@ -250,20 +260,20 @@ fn build_skeletons(
     let mut tokens_used = 0;
 
     let skeleton_data = reducer::render_skeletons(req.conn, &file_order, false)?;
-    for (path, content, _sym_count, _orig_lines) in skeleton_data {
-        let skel_tokens = req.estimator.estimate(&content);
+    for skel in skeleton_data {
+        let skel_tokens = req.estimator.estimate(&skel.content);
         if tokens_used + skel_tokens > budget {
             continue;
         }
 
         let (sym_names, depth) = adjacent_by_file
-            .get(&path)
+            .get(&skel.path)
             .cloned()
             .unwrap_or_else(|| (Vec::new(), 0));
 
         skeletons.push(SkeletonFile {
-            path,
-            content,
+            path: skel.path,
+            content: skel.content,
             symbols: sym_names,
             expansion_depth: depth,
         });
@@ -271,6 +281,47 @@ fn build_skeletons(
     }
 
     Ok((skeletons, tokens_used))
+}
+
+/// Batch-loads `(file_path, symbol_name)` for a set of symbol IDs.
+///
+/// Chunks IDs into groups of `BATCH_PARAM_LIMIT` to stay within the `SQLite`
+/// parameter limit, querying `WHERE s.id IN (...)` per chunk.
+fn batch_load_symbol_file_names(
+    conn: &Connection,
+    ids: &[i64],
+) -> Result<HashMap<i64, (String, String)>> {
+    let mut result = HashMap::with_capacity(ids.len());
+    for chunk in ids.chunks(BATCH_PARAM_LIMIT) {
+        let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "SELECT s.id, f.path, s.name FROM symbols s \
+             JOIN files f ON s.file_id = f.id \
+             WHERE s.id IN ({})",
+            placeholders.join(", ")
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .context("prepare batch_load_symbol_file_names")?;
+        let params: Vec<&dyn rusqlite::types::ToSql> = chunk
+            .iter()
+            .map(|id| id as &dyn rusqlite::types::ToSql)
+            .collect();
+        let rows = stmt
+            .query_map(params.as_slice(), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .context("query batch symbol file names")?;
+        for row in rows {
+            let (id, path, name) = row.context("read symbol file name row")?;
+            result.insert(id, (path, name));
+        }
+    }
+    Ok(result)
 }
 
 /// BFS expansion from pivot symbols, following edges in both directions.
@@ -313,21 +364,20 @@ fn bfs_expand(
 /// Reads file content from the workspace by resolving a relative path.
 ///
 /// Canonicalizes the resolved path and validates that it remains under the
-/// workspace root, preventing path-traversal attacks via `../` segments.
-fn read_file_content(workspace_root: &Path, rel_path: &str) -> Result<String> {
+/// pre-computed `canonical_root`, preventing path-traversal attacks via
+/// `../` segments.
+fn read_file_content(
+    workspace_root: &Path,
+    canonical_root: &Path,
+    rel_path: &str,
+) -> Result<String> {
     let abs_path = workspace_root.join(rel_path);
     // Prevent path traversal — verify resolved path is under workspace root.
     let canonical = abs_path
         .canonicalize()
         .with_context(|| format!("cannot resolve file: {}", abs_path.display()))?;
-    let canonical_root = workspace_root.canonicalize().with_context(|| {
-        format!(
-            "cannot resolve workspace root: {}",
-            workspace_root.display()
-        )
-    })?;
     anyhow::ensure!(
-        canonical.starts_with(&canonical_root),
+        canonical.starts_with(canonical_root),
         "path traversal detected: {rel_path} escapes workspace root"
     );
     std::fs::read_to_string(&canonical)
@@ -339,7 +389,7 @@ fn read_file_content(workspace_root: &Path, rel_path: &str) -> Result<String> {
 /// Each hint includes the direct caller/callee counts and a blast radius
 /// classification based on the transitive caller count.
 #[must_use]
-#[allow(clippy::similar_names)]
+#[allow(clippy::similar_names)] // callers/callees are distinct domain concepts
 pub fn generate_impact_hints(
     graph: &SymbolGraph,
     pivot_results: &[SearchResult],
@@ -358,12 +408,7 @@ pub fn generate_impact_hints(
                 .count();
 
             let transitive = count_transitive_callers(graph, *node);
-            let blast_radius = match transitive {
-                0..=4 => "low",
-                5..=20 => "medium",
-                _ => "high",
-            }
-            .to_string();
+            let blast_radius = BlastRadius::from_caller_count(transitive);
 
             Some(ImpactHint {
                 fqn: result.fqn.clone(),
@@ -483,6 +528,47 @@ mod tests {
     }
 
     #[test]
+    fn read_file_content_rejects_path_traversal() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let canonical_root = workspace.path().canonicalize().unwrap();
+
+        // Create a real file OUTSIDE the workspace so canonicalize() succeeds
+        // and the starts_with() guard is what actually catches the traversal.
+        let outside = workspace.path().parent().unwrap();
+        let target = outside.join("traversal_target.txt");
+        std::fs::write(&target, "secret").unwrap();
+
+        let result =
+            read_file_content(workspace.path(), &canonical_root, "../traversal_target.txt");
+
+        // Clean up the outside file regardless of test outcome.
+        let _ = std::fs::remove_file(&target);
+
+        assert!(
+            result.is_err(),
+            "path traversal should be rejected, but got: {result:?}"
+        );
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("path traversal"),
+            "expected 'path traversal detected' error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn read_file_content_allows_valid_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let workspace = tmp.path();
+        let canonical_root = workspace.canonicalize().unwrap();
+
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::write(workspace.join("src/main.ts"), "export function main() {}").unwrap();
+
+        let content = read_file_content(workspace, &canonical_root, "src/main.ts").unwrap();
+        assert_eq!(content, "export function main() {}");
+    }
+
+    #[test]
     fn impact_hints_blast_radius_categories() {
         let mut g = DiGraph::new();
         let a = g.add_node(1_i64);
@@ -516,6 +602,9 @@ mod tests {
 
         let hints = generate_impact_hints(&graph, &results);
         assert_eq!(hints.len(), 1);
-        assert!(["low", "medium", "high"].contains(&hints[0].blast_radius.as_str()));
+        assert!(matches!(
+            hints[0].blast_radius,
+            BlastRadius::Low | BlastRadius::Medium | BlastRadius::High
+        ));
     }
 }

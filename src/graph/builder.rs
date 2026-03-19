@@ -44,7 +44,13 @@ pub fn build_graph(conn: &Connection) -> Result<SymbolGraph> {
     let symbol_ids: Vec<i64> = stmt
         .query_map([], |row| row.get::<_, i64>(0))
         .context("query symbol IDs")?
-        .filter_map(Result::ok)
+        .filter_map(|r| match r {
+            Ok(val) => Some(val),
+            Err(e) => {
+                tracing::warn!("skipping corrupt row in graph build (symbols): {e}");
+                None
+            }
+        })
         .collect();
 
     for sym_id in symbol_ids {
@@ -67,7 +73,13 @@ pub fn build_graph(conn: &Connection) -> Result<SymbolGraph> {
             ))
         })
         .context("query edges")?
-        .filter_map(Result::ok)
+        .filter_map(|r| match r {
+            Ok(val) => Some(val),
+            Err(e) => {
+                tracing::warn!("skipping corrupt row in graph build (edges): {e}");
+                None
+            }
+        })
         .collect();
 
     for (from_id, to_id, kind) in edges {

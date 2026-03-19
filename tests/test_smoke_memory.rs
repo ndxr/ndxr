@@ -1,28 +1,6 @@
 //! Smoke tests: memory module edge cases (store, search, staleness, compression, capture).
 
-use std::fs;
-
-use tempfile::TempDir;
-
-// ---------------------------------------------------------------------------
-// Helper: create and index a minimal TypeScript project.
-// ---------------------------------------------------------------------------
-
-fn setup_indexed_workspace() -> (TempDir, ndxr::config::NdxrConfig) {
-    let tmp = TempDir::new().unwrap();
-    fs::create_dir(tmp.path().join(".git")).unwrap();
-    fs::create_dir_all(tmp.path().join("src")).unwrap();
-    fs::write(
-        tmp.path().join("src/auth.ts"),
-        r"
-export function validateToken(token: string): boolean { return true; }
-",
-    )
-    .unwrap();
-    let config = ndxr::config::NdxrConfig::from_workspace(tmp.path().canonicalize().unwrap());
-    ndxr::indexer::index(&config).unwrap();
-    (tmp, config)
-}
+mod helpers;
 
 /// Creates an old session with the given timestamp offset (seconds before now).
 fn create_old_session(conn: &rusqlite::Connection, age_secs: i64) -> String {
@@ -64,7 +42,7 @@ fn insert_observation_raw(
 
 #[test]
 fn save_observation_unicode_content() {
-    let (_tmp, config) = setup_indexed_workspace();
+    let (_tmp, config) = helpers::setup_indexed_workspace();
     let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
     let session_id = ndxr::memory::store::create_session(&conn).unwrap();
 
@@ -90,7 +68,7 @@ fn save_observation_unicode_content() {
 
 #[test]
 fn save_observation_very_long_content() {
-    let (_tmp, config) = setup_indexed_workspace();
+    let (_tmp, config) = helpers::setup_indexed_workspace();
     let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
     let session_id = ndxr::memory::store::create_session(&conn).unwrap();
 
@@ -117,7 +95,7 @@ fn save_observation_very_long_content() {
 
 #[test]
 fn save_observation_empty_headline() {
-    let (_tmp, config) = setup_indexed_workspace();
+    let (_tmp, config) = helpers::setup_indexed_workspace();
     let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
     let session_id = ndxr::memory::store::create_session(&conn).unwrap();
 
@@ -143,7 +121,7 @@ fn save_observation_empty_headline() {
 
 #[test]
 fn save_observation_all_valid_kinds() {
-    let (_tmp, config) = setup_indexed_workspace();
+    let (_tmp, config) = helpers::setup_indexed_workspace();
     let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
     let session_id = ndxr::memory::store::create_session(&conn).unwrap();
 
@@ -177,7 +155,7 @@ fn save_observation_all_valid_kinds() {
 
 #[test]
 fn save_observation_duplicate_linked_fqns() {
-    let (_tmp, config) = setup_indexed_workspace();
+    let (_tmp, config) = helpers::setup_indexed_workspace();
     let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
     let session_id = ndxr::memory::store::create_session(&conn).unwrap();
 
@@ -202,7 +180,7 @@ fn save_observation_duplicate_linked_fqns() {
 
 #[test]
 fn get_recent_sessions_multiple_sessions() {
-    let (_tmp, config) = setup_indexed_workspace();
+    let (_tmp, config) = helpers::setup_indexed_workspace();
     let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
 
     for _ in 0..5 {
@@ -222,7 +200,7 @@ fn get_recent_sessions_multiple_sessions() {
 
 #[test]
 fn search_memory_special_chars_only() {
-    let (_tmp, config) = setup_indexed_workspace();
+    let (_tmp, config) = helpers::setup_indexed_workspace();
     let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
     let session_id = ndxr::memory::store::create_session(&conn).unwrap();
 
@@ -249,7 +227,7 @@ fn search_memory_special_chars_only() {
 
 #[test]
 fn search_memory_very_long_query() {
-    let (_tmp, config) = setup_indexed_workspace();
+    let (_tmp, config) = helpers::setup_indexed_workspace();
     let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
     let session_id = ndxr::memory::store::create_session(&conn).unwrap();
 
@@ -275,7 +253,7 @@ fn search_memory_very_long_query() {
 
 #[test]
 fn search_memory_empty_pivot_fqns() {
-    let (_tmp, config) = setup_indexed_workspace();
+    let (_tmp, config) = helpers::setup_indexed_workspace();
     let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
     let session_id = ndxr::memory::store::create_session(&conn).unwrap();
 
@@ -305,7 +283,7 @@ fn search_memory_empty_pivot_fqns() {
 
 #[test]
 fn search_memory_include_stale_true_vs_false() {
-    let (_tmp, config) = setup_indexed_workspace();
+    let (_tmp, config) = helpers::setup_indexed_workspace();
     let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
     let session_id = ndxr::memory::store::create_session(&conn).unwrap();
 
@@ -366,7 +344,7 @@ fn search_memory_include_stale_true_vs_false() {
 
 #[test]
 fn search_memory_limit_zero() {
-    let (_tmp, config) = setup_indexed_workspace();
+    let (_tmp, config) = helpers::setup_indexed_workspace();
     let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
     let session_id = ndxr::memory::store::create_session(&conn).unwrap();
 
@@ -391,7 +369,7 @@ fn search_memory_limit_zero() {
 
 #[test]
 fn search_memory_returns_linked_fqns() {
-    let (_tmp, config) = setup_indexed_workspace();
+    let (_tmp, config) = helpers::setup_indexed_workspace();
     let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
     let session_id = ndxr::memory::store::create_session(&conn).unwrap();
 
@@ -433,7 +411,7 @@ fn search_memory_returns_linked_fqns() {
 
 #[test]
 fn staleness_empty_changes_marks_nothing() {
-    let (_tmp, config) = setup_indexed_workspace();
+    let (_tmp, config) = helpers::setup_indexed_workspace();
     let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
     let session_id = ndxr::memory::store::create_session(&conn).unwrap();
 
@@ -456,7 +434,7 @@ fn staleness_empty_changes_marks_nothing() {
 
 #[test]
 fn staleness_multiple_observations_same_symbol() {
-    let (_tmp, config) = setup_indexed_workspace();
+    let (_tmp, config) = helpers::setup_indexed_workspace();
     let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
     let session_id = ndxr::memory::store::create_session(&conn).unwrap();
 
@@ -499,7 +477,7 @@ fn staleness_multiple_observations_same_symbol() {
 
 #[test]
 fn staleness_all_change_types_mark_stale() {
-    let (_tmp, config) = setup_indexed_workspace();
+    let (_tmp, config) = helpers::setup_indexed_workspace();
     let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
     let session_id = ndxr::memory::store::create_session(&conn).unwrap();
 
@@ -547,7 +525,7 @@ fn staleness_all_change_types_mark_stale() {
 
 #[test]
 fn staleness_observation_linked_to_multiple_symbols_partial_change() {
-    let (_tmp, config) = setup_indexed_workspace();
+    let (_tmp, config) = helpers::setup_indexed_workspace();
     let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
     let session_id = ndxr::memory::store::create_session(&conn).unwrap();
 
@@ -596,7 +574,7 @@ fn staleness_observation_linked_to_multiple_symbols_partial_change() {
 
 #[test]
 fn compression_all_auto_observations_deleted() {
-    let (_tmp, config) = setup_indexed_workspace();
+    let (_tmp, config) = helpers::setup_indexed_workspace();
     let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
 
     let session_id = create_old_session(&conn, 10_000);
@@ -637,7 +615,7 @@ fn compression_all_auto_observations_deleted() {
 
 #[test]
 fn compression_preserves_all_non_auto_kinds() {
-    let (_tmp, config) = setup_indexed_workspace();
+    let (_tmp, config) = helpers::setup_indexed_workspace();
     let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
 
     let session_id = create_old_session(&conn, 10_000);
@@ -693,7 +671,7 @@ fn compression_preserves_all_non_auto_kinds() {
 
 #[test]
 fn compression_idempotent() {
-    let (_tmp, config) = setup_indexed_workspace();
+    let (_tmp, config) = helpers::setup_indexed_workspace();
     let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
 
     let session_id = create_old_session(&conn, 10_000);
@@ -736,7 +714,7 @@ fn compression_idempotent() {
 
 #[test]
 fn compression_multiple_sessions() {
-    let (_tmp, config) = setup_indexed_workspace();
+    let (_tmp, config) = helpers::setup_indexed_workspace();
     let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
 
     let old_ts = std::time::SystemTime::now()
@@ -804,7 +782,7 @@ fn compression_multiple_sessions() {
 
 #[test]
 fn auto_capture_all_capturable_tools() {
-    let (_tmp, config) = setup_indexed_workspace();
+    let (_tmp, config) = helpers::setup_indexed_workspace();
     let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
     let session_id = ndxr::memory::store::create_session(&conn).unwrap();
 
@@ -846,7 +824,7 @@ fn auto_capture_all_capturable_tools() {
 
 #[test]
 fn auto_capture_empty_query() {
-    let (_tmp, config) = setup_indexed_workspace();
+    let (_tmp, config) = helpers::setup_indexed_workspace();
     let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
     let session_id = ndxr::memory::store::create_session(&conn).unwrap();
 
@@ -867,7 +845,7 @@ fn auto_capture_empty_query() {
 
 #[test]
 fn auto_capture_truncation_multibyte() {
-    let (_tmp, config) = setup_indexed_workspace();
+    let (_tmp, config) = helpers::setup_indexed_workspace();
     let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
     let session_id = ndxr::memory::store::create_session(&conn).unwrap();
 

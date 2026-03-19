@@ -11,6 +11,7 @@ use anyhow::Result;
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::Mutex;
 
+use crate::graph::builder::SymbolGraph;
 use crate::languages;
 use crate::mcp::server::CoreEngine;
 
@@ -44,7 +45,7 @@ impl FileWatcher {
     ///
     /// Returns an error if the OS file watcher cannot be created or if
     /// watching the workspace root fails.
-    #[allow(clippy::needless_pass_by_value)]
+    #[allow(clippy::needless_pass_by_value)] // ownership moved into async task
     pub fn start(workspace_root: PathBuf, engine: Arc<CoreEngine>) -> Result<Self> {
         let debounce_ms = engine.config.debounce_ms;
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -65,7 +66,7 @@ impl FileWatcher {
         // Spawn debounce + re-index task.
         let ws_root = workspace_root.clone();
         tokio::spawn(async move {
-            let pending: Arc<Mutex<HashSet<PathBuf>>> = Arc::new(Mutex::new(HashSet::new()));
+            let pending: Mutex<HashSet<PathBuf>> = Mutex::new(HashSet::new());
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(debounce_ms));
 
             loop {
@@ -88,8 +89,11 @@ impl FileWatcher {
                             drop(pending_lock);
                             // Targeted re-index of only the changed files via
                             // spawn_blocking since the indexer is synchronous.
+                            // The closure returns the rebuilt graph so it can be
+                            // stored in the async context via write().await,
+                            // ensuring graph updates are never dropped.
                             let engine_clone = engine.clone();
-                            tokio::task::spawn_blocking(move || {
+                            let graph_result = tokio::task::spawn_blocking(move || {
                                 match crate::indexer::index_paths(&engine_clone.config, &paths) {
                                     Ok(stats) => {
                                         if stats.files_indexed > 0 || stats.files_deleted > 0 {
@@ -105,21 +109,20 @@ impl FileWatcher {
                                         tracing::error!("Watcher re-index failed: {e}");
                                     }
                                 }
-                                // Rebuild the graph + PageRank on a fresh connection and
-                                // store it in the shared CoreEngine.  `index_paths` skips
-                                // graph computation (to avoid duplicate work), so this is
-                                // the single place the graph is built after a watcher-
-                                // triggered re-index.
-                                if let Ok(conn) =
-                                    crate::storage::db::open_or_create(&engine_clone.config.db_path)
-                                    && let Ok(graph) = crate::graph::builder::build_graph(&conn)
-                                {
-                                    let _ = crate::graph::centrality::compute_and_store(&conn, &graph);
-                                    if let Ok(mut graph_lock) = engine_clone.graph.try_lock() {
-                                        *graph_lock = Some(graph);
-                                    }
-                                }
-                            });
+                                // Rebuild the graph + PageRank on a fresh connection.
+                                // `index_paths` skips graph computation (to avoid
+                                // duplicate work), so this is the single place the
+                                // graph is built after a watcher-triggered re-index.
+                                rebuild_graph(&engine_clone.config.db_path)
+                            }).await;
+
+                            // Store the rebuilt graph in CoreEngine, waiting for any
+                            // in-progress reads to finish. This ensures graph updates
+                            // are ALWAYS applied (unlike the previous try_lock approach).
+                            if let Ok(Some(graph)) = graph_result {
+                                let mut graph_lock = engine.graph.write().await;
+                                *graph_lock = Some(graph);
+                            }
                         }
                     }
                 }
@@ -136,6 +139,15 @@ impl FileWatcher {
     pub fn shutdown(self) {
         let _ = self.shutdown_tx.send(());
     }
+}
+
+/// Rebuilds the symbol graph and computes `PageRank` centrality on a fresh
+/// database connection. Returns `None` if the connection or graph build fails.
+fn rebuild_graph(db_path: &Path) -> Option<SymbolGraph> {
+    let conn = crate::storage::db::open_or_create(db_path).ok()?;
+    let graph = crate::graph::builder::build_graph(&conn).ok()?;
+    let _ = crate::graph::centrality::compute_and_store(&conn, &graph);
+    Some(graph)
 }
 
 /// Checks if a file event path should trigger re-indexing.

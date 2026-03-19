@@ -9,10 +9,11 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 
+use crate::indexer::tokenizer::{self, build_fts_query};
+use crate::storage::db::BATCH_PARAM_LIMIT;
 use crate::util::unix_now;
 
-use super::store::{self, Observation};
-use crate::indexer::tokenizer::{self, build_fts_query};
+use super::store::Observation;
 
 /// A memory search result with composite scoring.
 #[derive(Debug, Clone)]
@@ -55,7 +56,7 @@ const FTS_CANDIDATE_LIMIT: usize = 50;
 /// # Errors
 ///
 /// Returns an error if any database query fails.
-#[allow(clippy::cast_precision_loss)]
+#[allow(clippy::cast_precision_loss)] // usize->f64 loss negligible for counts
 pub fn search_memories(
     conn: &Connection,
     query: &str,
@@ -74,29 +75,35 @@ pub fn search_memories(
         return Ok(Vec::new());
     }
 
-    // 2. Tokenize query for TF-IDF cosine similarity.
+    // 2. Batch-load all observations and their links in two queries instead of N+1.
+    let candidate_ids: Vec<i64> = candidates.iter().map(|(id, _)| *id).collect();
+    let observations = batch_load_observations(conn, &candidate_ids)?;
+    let all_links = batch_load_observation_links(conn, &candidate_ids)?;
+
+    // 3. Tokenize query for TF-IDF cosine similarity.
     let query_tokens = tokenizer::tokenize_text(query);
     let query_tf = tokenizer::compute_tf(&query_tokens);
 
-    // 3. Compute min/max BM25 for normalisation.
+    // 4. Compute min/max BM25 for normalisation.
     let (bm25_min, bm25_max) = bm25_range(&candidates);
 
     let now_secs = unix_now();
     let pivot_set: HashSet<&str> = pivot_fqns.iter().map(String::as_str).collect();
 
-    // 4. Score each candidate.
+    // 5. Score each candidate.
     let mut results: Vec<MemoryResult> = Vec::with_capacity(candidates.len());
 
     for (obs_id, raw_bm25) in &candidates {
-        let obs = load_observation(conn, *obs_id)?;
-        let Some(obs) = obs else { continue };
+        let Some(obs) = observations.get(obs_id) else {
+            continue;
+        };
 
         // Filter stale if requested.
         if !include_stale && obs.is_stale {
             continue;
         }
 
-        let linked_fqns = store::get_observation_links(conn, obs.id)?;
+        let linked_fqns = all_links.get(obs_id).cloned().unwrap_or_default();
 
         // a) BM25 normalised.
         let bm25_norm = if (bm25_max - bm25_min).abs() < f64::EPSILON {
@@ -136,21 +143,17 @@ pub fn search_memories(
         let score = (weighted - stale_penalty).max(0.0);
 
         results.push(MemoryResult {
-            observation: obs,
+            observation: obs.clone(),
             memory_score: score,
             linked_fqns,
         });
     }
 
-    // 5. Sort by score descending and truncate.
-    results.sort_by(|a, b| {
-        b.memory_score
-            .partial_cmp(&a.memory_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    // 6. Sort by score descending and truncate.
+    results.sort_by(|a, b| b.memory_score.total_cmp(&a.memory_score));
     results.truncate(limit);
 
-    // 6. Persist scores to the database for later retrieval without recomputation.
+    // 7. Persist scores to the database for later retrieval without recomputation.
     persist_scores(conn, &results);
 
     Ok(results)
@@ -212,45 +215,101 @@ fn bm25_range(candidates: &[(i64, f64)]) -> (f64, f64) {
     (min, max)
 }
 
-/// Loads a single observation by its row ID.
-fn load_observation(conn: &Connection, obs_id: i64) -> Result<Option<Observation>> {
-    let result = conn.query_row(
-        "SELECT id, session_id, kind, content, headline, detail_level, is_stale, \
-         created_at, score \
-         FROM observations WHERE id = ?1",
-        params![obs_id],
-        |row| {
-            Ok(Observation {
-                id: row.get(0)?,
-                session_id: row.get(1)?,
-                kind: row.get(2)?,
-                content: row.get(3)?,
-                headline: row.get(4)?,
-                detail_level: row.get(5)?,
-                is_stale: row.get(6)?,
-                created_at: row.get(7)?,
-                score: row.get(8)?,
+/// Batch-loads observations by their row IDs.
+///
+/// Chunks IDs into groups of `BATCH_PARAM_LIMIT` to stay within the `SQLite`
+/// parameter limit, querying `WHERE id IN (...)` per chunk.
+fn batch_load_observations(conn: &Connection, ids: &[i64]) -> Result<HashMap<i64, Observation>> {
+    let mut result = HashMap::with_capacity(ids.len());
+    for chunk in ids.chunks(BATCH_PARAM_LIMIT) {
+        let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "SELECT id, session_id, kind, content, headline, detail_level, is_stale, \
+             created_at, score \
+             FROM observations WHERE id IN ({})",
+            placeholders.join(", ")
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .context("prepare batch_load_observations")?;
+        let params: Vec<&dyn rusqlite::types::ToSql> = chunk
+            .iter()
+            .map(|id| id as &dyn rusqlite::types::ToSql)
+            .collect();
+        let rows = stmt
+            .query_map(params.as_slice(), |row| {
+                Ok(Observation {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    kind: row.get(2)?,
+                    content: row.get(3)?,
+                    headline: row.get(4)?,
+                    detail_level: row.get(5)?,
+                    is_stale: row.get(6)?,
+                    created_at: row.get(7)?,
+                    score: row.get(8)?,
+                })
             })
-        },
-    );
-
-    match result {
-        Ok(obs) => Ok(Some(obs)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(e).context("load observation by id"),
+            .context("query batch observations")?;
+        for row in rows {
+            let obs = row.context("read observation row")?;
+            result.insert(obs.id, obs);
+        }
     }
+    Ok(result)
 }
 
-/// Writes computed memory scores back to the `observations.score` column.
+/// Batch-loads linked FQNs for a set of observation IDs.
 ///
-/// Enables later retrieval of observations ranked by their last search
-/// relevance without recomputing the full scoring pipeline.
-fn persist_scores(conn: &Connection, results: &[MemoryResult]) {
-    for result in results {
-        let _ = conn.execute(
-            "UPDATE observations SET score = ?1 WHERE id = ?2",
-            params![result.memory_score, result.observation.id],
+/// Returns a map from observation ID to its list of linked symbol FQNs.
+fn batch_load_observation_links(
+    conn: &Connection,
+    ids: &[i64],
+) -> Result<HashMap<i64, Vec<String>>> {
+    let mut result: HashMap<i64, Vec<String>> = HashMap::with_capacity(ids.len());
+    for chunk in ids.chunks(BATCH_PARAM_LIMIT) {
+        let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "SELECT observation_id, symbol_fqn FROM observation_links \
+             WHERE observation_id IN ({})",
+            placeholders.join(", ")
         );
+        let mut stmt = conn
+            .prepare(&sql)
+            .context("prepare batch_load_observation_links")?;
+        let params: Vec<&dyn rusqlite::types::ToSql> = chunk
+            .iter()
+            .map(|id| id as &dyn rusqlite::types::ToSql)
+            .collect();
+        let rows = stmt
+            .query_map(params.as_slice(), |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .context("query batch observation links")?;
+        for row in rows {
+            let (obs_id, fqn) = row.context("read observation link row")?;
+            result.entry(obs_id).or_default().push(fqn);
+        }
+    }
+    Ok(result)
+}
+
+/// Persists relevance scores back to the database (best-effort).
+///
+/// Errors are intentionally silenced because score persistence is
+/// an optimization, not a correctness requirement. A failed update
+/// only means the next search won't benefit from cached scores.
+///
+/// Wraps all updates in a single transaction for efficiency.
+fn persist_scores(conn: &Connection, results: &[MemoryResult]) {
+    if let Ok(tx) = conn.unchecked_transaction() {
+        for result in results {
+            let _ = tx.execute(
+                "UPDATE observations SET score = ?1 WHERE id = ?2",
+                params![result.memory_score, result.observation.id],
+            );
+        }
+        let _ = tx.commit();
     }
 }
 

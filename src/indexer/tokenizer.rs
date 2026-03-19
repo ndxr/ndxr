@@ -108,7 +108,7 @@ pub fn tokenize_text(text: &str) -> Vec<String> {
 ///
 /// Returns an empty map for empty input.
 #[must_use]
-#[allow(clippy::cast_precision_loss)]
+#[allow(clippy::cast_precision_loss)] // usize->f64 loss negligible for counts
 pub fn compute_tf(tokens: &[String]) -> HashMap<String, f64> {
     if tokens.is_empty() {
         return HashMap::new();

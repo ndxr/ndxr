@@ -5,7 +5,9 @@
 //! are marked `is_stale = 1`.
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, params};
+use rusqlite::Connection;
+
+use crate::storage::db::BATCH_PARAM_LIMIT;
 
 /// A symbol that changed during re-indexing.
 pub struct ChangedSymbol {
@@ -27,8 +29,10 @@ pub enum SymbolChange {
 
 /// Detects and marks stale observations for changed symbols.
 ///
-/// For each changed or deleted symbol, finds all observations linked to that
-/// FQN via `observation_links` and sets `is_stale = 1`.
+/// For each batch of changed or deleted symbols, finds all observations linked
+/// to those FQNs via `observation_links` and sets `is_stale = 1`.
+/// Uses `WHERE symbol_fqn IN (...)` with chunking for efficiency and wraps
+/// all updates in a single transaction.
 ///
 /// Returns the number of observations marked stale.
 ///
@@ -36,19 +40,34 @@ pub enum SymbolChange {
 ///
 /// Returns an error if any database update fails.
 pub fn detect_staleness(conn: &Connection, changed_symbols: &[ChangedSymbol]) -> Result<usize> {
+    if changed_symbols.is_empty() {
+        return Ok(0);
+    }
+
+    let tx = conn
+        .unchecked_transaction()
+        .context("begin staleness transaction")?;
     let mut total_marked = 0;
 
-    for sym in changed_symbols {
-        let count = conn
-            .execute(
-                "UPDATE observations SET is_stale = 1 WHERE id IN (\
-                     SELECT observation_id FROM observation_links WHERE symbol_fqn = ?1\
-                 ) AND is_stale = 0",
-                params![sym.fqn],
-            )
-            .with_context(|| format!("mark stale observations for {}", sym.fqn))?;
+    let fqns: Vec<&str> = changed_symbols.iter().map(|s| s.fqn.as_str()).collect();
+    for chunk in fqns.chunks(BATCH_PARAM_LIMIT) {
+        let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "UPDATE observations SET is_stale = 1 WHERE id IN (\
+                 SELECT observation_id FROM observation_links WHERE symbol_fqn IN ({})\
+             ) AND is_stale = 0",
+            placeholders.join(", ")
+        );
+        let params: Vec<&dyn rusqlite::types::ToSql> = chunk
+            .iter()
+            .map(|fqn| fqn as &dyn rusqlite::types::ToSql)
+            .collect();
+        let count = tx
+            .execute(&sql, params.as_slice())
+            .context("mark stale observations batch")?;
         total_marked += count;
     }
 
+    tx.commit().context("commit staleness transaction")?;
     Ok(total_marked)
 }

@@ -28,7 +28,7 @@ use crate::indexer::tokenizer;
 /// # Errors
 ///
 /// Returns an error if any database operation fails.
-#[allow(clippy::cast_possible_wrap)]
+#[allow(clippy::cast_possible_wrap)] // small usize fits in i64
 pub fn compress_inactive_sessions(conn: &Connection, max_age_secs: u64) -> Result<usize> {
     let now = unix_now();
     let cutoff = now - max_age_secs as i64;
@@ -40,7 +40,13 @@ pub fn compress_inactive_sessions(conn: &Connection, max_age_secs: u64) -> Resul
     let session_ids: Vec<String> = stmt
         .query_map(params![cutoff], |row| row.get(0))
         .context("query inactive sessions")?
-        .filter_map(Result::ok)
+        .filter_map(|r| match r {
+            Ok(val) => Some(val),
+            Err(e) => {
+                tracing::warn!("skipping corrupt row in session query: {e}");
+                None
+            }
+        })
         .collect();
 
     for session_id in &session_ids {
@@ -60,7 +66,13 @@ fn compress_session(conn: &Connection, session_id: &str) -> Result<()> {
     let rows: Vec<(String, Option<String>)> = stmt
         .query_map(params![session_id], |row| Ok((row.get(0)?, row.get(1)?)))
         .context("query observations for compression")?
-        .filter_map(Result::ok)
+        .filter_map(|r| match r {
+            Ok(val) => Some(val),
+            Err(e) => {
+                tracing::warn!("skipping corrupt observation row in compression: {e}");
+                None
+            }
+        })
         .collect();
 
     // Extract key terms: tokenize all contents, compute TF, take top 20.
@@ -70,7 +82,7 @@ fn compress_session(conn: &Connection, session_id: &str) -> Result<()> {
     }
     let tf = tokenizer::compute_tf(&all_tokens);
     let mut terms: Vec<(String, f64)> = tf.into_iter().collect();
-    terms.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    terms.sort_by(|a, b| b.1.total_cmp(&a.1));
     let key_terms: Vec<String> = terms.into_iter().take(20).map(|(t, _)| t).collect();
     let key_terms_str = key_terms.join(",");
 
@@ -86,7 +98,13 @@ fn compress_session(conn: &Connection, session_id: &str) -> Result<()> {
     let fqns: Vec<String> = fqn_stmt
         .query_map(params![session_id], |row| row.get(0))
         .context("query linked FQNs for compression")?
-        .filter_map(Result::ok)
+        .filter_map(|r| match r {
+            Ok(val) => Some(val),
+            Err(e) => {
+                tracing::warn!("skipping corrupt FQN row in compression: {e}");
+                None
+            }
+        })
         .collect();
 
     let key_files: HashSet<String> = fqns

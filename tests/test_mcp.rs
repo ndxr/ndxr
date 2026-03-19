@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use tempfile::TempDir;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 use ndxr::capsule::builder::{self, CapsuleRequest};
 use ndxr::capsule::relaxation;
@@ -135,8 +135,13 @@ fn index_status_returns_correct_counts() {
         symbol_count >= 4,
         "should have at least 4 symbols, got {symbol_count}"
     );
-    // Edges may or may not exist depending on cross-file resolution.
-    assert!(edge_count >= 0, "edge count should be non-negative");
+    // The fixture files have no cross-file imports and no function calls
+    // that resolve to known symbols in the index, so edge_resolver
+    // inserts no edges.
+    assert_eq!(
+        edge_count, 0,
+        "fixture has no resolvable cross-file edges, got {edge_count}"
+    );
 }
 
 #[test]
@@ -173,7 +178,7 @@ fn search_produces_results() {
     let graph = graph_builder::build_graph(&conn).unwrap();
     centrality::compute_and_store(&conn, &graph).unwrap();
 
-    let results = relaxation::search_with_relaxation(
+    let outcome = relaxation::search_with_relaxation(
         &conn,
         &graph,
         "validateToken",
@@ -181,6 +186,7 @@ fn search_produces_results() {
         Some(Intent::Explore),
     )
     .unwrap();
+    let results = outcome.results;
 
     assert!(
         !results.is_empty(),
@@ -203,9 +209,10 @@ fn capsule_has_pivots() {
     centrality::compute_and_store(&conn, &graph).unwrap();
 
     let intent = Intent::Explore;
-    let results =
+    let outcome =
         relaxation::search_with_relaxation(&conn, &graph, "AuthService login", 10, Some(intent))
             .unwrap();
+    let results = outcome.results;
 
     let estimator = TokenEstimator::default();
     let req = CapsuleRequest {
@@ -244,13 +251,17 @@ fn skeleton_renders_output() {
         "should render at least one skeleton for auth.ts"
     );
 
-    let (path, content, sym_count, _) = &skeletons[0];
-    assert_eq!(path, "src/auth.ts");
+    let skel = &skeletons[0];
+    assert_eq!(skel.path, "src/auth.ts");
     assert!(
-        *sym_count > 0,
-        "skeleton should have at least one symbol, got {sym_count}"
+        skel.symbol_count > 0,
+        "skeleton should have at least one symbol, got {}",
+        skel.symbol_count
     );
-    assert!(!content.is_empty(), "skeleton content should not be empty");
+    assert!(
+        !skel.content.is_empty(),
+        "skeleton content should not be empty"
+    );
 }
 
 #[test]
@@ -292,7 +303,7 @@ fn impact_hints_for_symbols() {
     let graph = graph_builder::build_graph(&conn).unwrap();
     centrality::compute_and_store(&conn, &graph).unwrap();
 
-    let results = relaxation::search_with_relaxation(
+    let outcome = relaxation::search_with_relaxation(
         &conn,
         &graph,
         "validateToken",
@@ -300,13 +311,19 @@ fn impact_hints_for_symbols() {
         Some(Intent::Explore),
     )
     .unwrap();
+    let results = outcome.results;
 
     let hints = builder::generate_impact_hints(&graph, &results);
 
     // Impact hints should have one entry per search result that exists in the graph.
     for hint in &hints {
         assert!(
-            ["low", "medium", "high"].contains(&hint.blast_radius.as_str()),
+            matches!(
+                hint.blast_radius,
+                ndxr::capsule::BlastRadius::Low
+                    | ndxr::capsule::BlastRadius::Medium
+                    | ndxr::capsule::BlastRadius::High
+            ),
             "blast_radius should be low/medium/high, got: {}",
             hint.blast_radius
         );
@@ -397,7 +414,7 @@ async fn ndxr_server_can_be_constructed() {
     let engine = Arc::new(CoreEngine {
         config,
         conn: Mutex::new(conn),
-        graph: Mutex::new(Some(graph)),
+        graph: RwLock::new(Some(graph)),
     });
 
     let server = NdxrServer::new(engine, session_id);

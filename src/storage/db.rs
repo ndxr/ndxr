@@ -11,6 +11,11 @@ use rusqlite::Connection;
 
 use crate::util::unix_now;
 
+/// Maximum number of SQL parameters per batch query.
+///
+/// Set to 900 to stay safely below `SQLite`'s default `SQLITE_LIMIT_VARIABLE_NUMBER` (999).
+pub(crate) const BATCH_PARAM_LIMIT: usize = 900;
+
 /// Opens an existing ndxr database or creates a new one at `path`.
 ///
 /// Parent directories are created if they do not exist. Connection pragmas
