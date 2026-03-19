@@ -5,6 +5,7 @@
 
 # Project-specific
 .ndxr/
+.worktrees/
 docs/plans/
 docs/specs/
 docs/superpowers/
