@@ -178,6 +178,7 @@ Every `.rs` file follows this top-to-bottom order. **Never mix sections.**
 - `BATCH_PARAM_LIMIT` → `storage/db.rs` | `collect_index_status()` → `status.rs`
 - `run_capsule_pipeline()` / `commit_tool_record()` → `mcp/server.rs`
 - Test helpers → `tests/helpers/mod.rs`
+- `u32_child_count()` / `u32_named_child_count()` → `indexer/symbols.rs` (tree-sitter `u32` ↔ `usize` bridge)
 
 ### No Dead Code / No Deferred Work
 
@@ -232,6 +233,8 @@ Every `.rs` file follows this top-to-bottom order. **Never mix sections.**
 - **`index_paths()` skips graph rebuild** — watcher rebuilds separately via `graph.write().await`
 - **`ParseResult.path` is relative** — relative to workspace_root, not absolute
 - **Edition 2024 let-chains** — `if let Ok(x) = foo() && let Ok(y) = bar(x)` used throughout
+- **tree-sitter `named_child(u32)` vs `named_child_count() -> usize`** — use `u32_named_child_count()` helper in `symbols.rs`. When adding language query patterns, verify node types against `node-types.json` in the cargo registry, don't assume names
+- **Clippy `ignored_unit_patterns`** — `tokio::select!` arms must use `() = async { ... }` not `_ = async { ... }`
 
 ## Commit Convention
 
