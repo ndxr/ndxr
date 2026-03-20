@@ -30,6 +30,12 @@ const SYMBOL_QUERY: &str = "
 
 (constructor_declaration
   name: (identifier) @name) @definition
+
+(record_declaration
+  name: (identifier) @name) @definition
+
+(delegate_declaration
+  name: (identifier) @name) @definition
 ";
 
 const IMPORT_QUERY: &str = "

@@ -43,13 +43,22 @@ pub fn diff_files(
         .prepare("SELECT path, blake3_hash FROM files")
         .context("prepare files query")?;
 
-    let indexed: HashMap<String, String> = stmt
+    let mut indexed: HashMap<String, String> = HashMap::new();
+    let rows = stmt
         .query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })
-        .context("query indexed files")?
-        .filter_map(std::result::Result::ok)
-        .collect();
+        .context("query indexed files")?;
+    for row in rows {
+        match row {
+            Ok((path, hash)) => {
+                indexed.insert(path, hash);
+            }
+            Err(e) => {
+                tracing::warn!("skipping corrupt file row in manifest diff: {e}");
+            }
+        }
+    }
 
     let mut result = Vec::new();
     let mut seen_paths: HashSet<String> = HashSet::new();

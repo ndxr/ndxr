@@ -19,17 +19,18 @@ fn capsule_respects_token_budget() {
 
     let results = ndxr::graph::search::hybrid_search(&conn, &graph, "auth", 10, None).unwrap();
     let estimator = ndxr::config::TokenEstimator::default();
-    let capsule = ndxr::capsule::builder::build_capsule(&ndxr::capsule::builder::CapsuleRequest {
-        conn: &conn,
-        graph: &graph,
-        search_results: &results,
-        query: "auth",
-        intent: &ndxr::graph::intent::Intent::Explore,
-        token_budget: 8000,
-        estimator: &estimator,
-        workspace_root: &config.workspace_root,
-    })
-    .unwrap();
+    let (capsule, _memory_budget) =
+        ndxr::capsule::builder::build_capsule(&ndxr::capsule::builder::CapsuleRequest {
+            conn: &conn,
+            graph: &graph,
+            search_results: &results,
+            query: "auth",
+            intent: &ndxr::graph::intent::Intent::Explore,
+            token_budget: 8000,
+            estimator: &estimator,
+            workspace_root: &config.workspace_root,
+        })
+        .unwrap();
 
     assert!(capsule.stats.tokens_used <= capsule.stats.tokens_budget);
 }
@@ -43,17 +44,18 @@ fn capsule_no_file_in_both_pivots_and_skeletons() {
 
     let results = ndxr::graph::search::hybrid_search(&conn, &graph, "validate", 10, None).unwrap();
     let estimator = ndxr::config::TokenEstimator::default();
-    let capsule = ndxr::capsule::builder::build_capsule(&ndxr::capsule::builder::CapsuleRequest {
-        conn: &conn,
-        graph: &graph,
-        search_results: &results,
-        query: "validate",
-        intent: &ndxr::graph::intent::Intent::Explore,
-        token_budget: 8000,
-        estimator: &estimator,
-        workspace_root: &config.workspace_root,
-    })
-    .unwrap();
+    let (capsule, _memory_budget) =
+        ndxr::capsule::builder::build_capsule(&ndxr::capsule::builder::CapsuleRequest {
+            conn: &conn,
+            graph: &graph,
+            search_results: &results,
+            query: "validate",
+            intent: &ndxr::graph::intent::Intent::Explore,
+            token_budget: 8000,
+            estimator: &estimator,
+            workspace_root: &config.workspace_root,
+        })
+        .unwrap();
 
     let pivot_paths: HashSet<_> = capsule.pivots.iter().map(|p| &p.path).collect();
     for skel in &capsule.skeletons {
@@ -74,17 +76,18 @@ fn capsule_pivots_contain_file_content() {
 
     let results = ndxr::graph::search::hybrid_search(&conn, &graph, "auth", 10, None).unwrap();
     let estimator = ndxr::config::TokenEstimator::default();
-    let capsule = ndxr::capsule::builder::build_capsule(&ndxr::capsule::builder::CapsuleRequest {
-        conn: &conn,
-        graph: &graph,
-        search_results: &results,
-        query: "auth",
-        intent: &ndxr::graph::intent::Intent::Explore,
-        token_budget: 8000,
-        estimator: &estimator,
-        workspace_root: &config.workspace_root,
-    })
-    .unwrap();
+    let (capsule, _memory_budget) =
+        ndxr::capsule::builder::build_capsule(&ndxr::capsule::builder::CapsuleRequest {
+            conn: &conn,
+            graph: &graph,
+            search_results: &results,
+            query: "auth",
+            intent: &ndxr::graph::intent::Intent::Explore,
+            token_budget: 8000,
+            estimator: &estimator,
+            workspace_root: &config.workspace_root,
+        })
+        .unwrap();
 
     for pivot in &capsule.pivots {
         assert!(
@@ -141,17 +144,18 @@ fn capsule_with_empty_search_results() {
 
     // Build capsule with empty search results -- should not crash
     let empty_results: Vec<ndxr::graph::search::SearchResult> = vec![];
-    let capsule = ndxr::capsule::builder::build_capsule(&ndxr::capsule::builder::CapsuleRequest {
-        conn: &conn,
-        graph: &graph,
-        search_results: &empty_results,
-        query: "nothing",
-        intent: &ndxr::graph::intent::Intent::Explore,
-        token_budget: 8000,
-        estimator: &estimator,
-        workspace_root: &config.workspace_root,
-    })
-    .unwrap();
+    let (capsule, _memory_budget) =
+        ndxr::capsule::builder::build_capsule(&ndxr::capsule::builder::CapsuleRequest {
+            conn: &conn,
+            graph: &graph,
+            search_results: &empty_results,
+            query: "nothing",
+            intent: &ndxr::graph::intent::Intent::Explore,
+            token_budget: 8000,
+            estimator: &estimator,
+            workspace_root: &config.workspace_root,
+        })
+        .unwrap();
 
     assert!(capsule.pivots.is_empty());
     assert!(capsule.skeletons.is_empty());

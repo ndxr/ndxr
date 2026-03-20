@@ -397,9 +397,20 @@ fn write_index_results(
             )
             .with_context(|| format!("insert symbol: {}", sym.fqn))?;
 
-            let sym_id = tx.last_insert_rowid();
+            let sym_id = if tx.changes() == 0 {
+                // INSERT OR IGNORE was a no-op (duplicate fqn+start_line).
+                // Look up the existing symbol's ID.
+                tx.query_row(
+                    "SELECT id FROM symbols WHERE fqn = ?1 AND start_line = ?2",
+                    params![sym.fqn, i64::try_from(sym.start_line).unwrap_or(i64::MAX)],
+                    |row| row.get::<_, i64>(0),
+                )
+                .with_context(|| format!("lookup existing symbol: {}", sym.fqn))?
+            } else {
+                stats.symbols_extracted += 1;
+                tx.last_insert_rowid()
+            };
             fqn_to_id.insert(sym.fqn.clone(), sym_id);
-            stats.symbols_extracted += 1;
         }
 
         // Resolve and insert edges.

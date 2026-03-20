@@ -14,16 +14,17 @@ pub fn normalize_path(path: &Path) -> String {
 }
 
 /// Returns the current Unix timestamp in seconds.
-///
-/// # Panics
-///
-/// Panics if the system clock is before the Unix epoch.
 #[must_use]
 pub fn unix_now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before UNIX epoch")
-        .as_secs()
-        .try_into()
-        .expect("timestamp exceeds i64 range")
+    let secs = match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(d) => d.as_secs(),
+        Err(e) => {
+            tracing::warn!("system clock before UNIX epoch: {e}");
+            0
+        }
+    };
+    i64::try_from(secs).unwrap_or_else(|_| {
+        tracing::warn!("Unix timestamp {secs} exceeds i64 range");
+        i64::MAX
+    })
 }

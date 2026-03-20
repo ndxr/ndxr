@@ -141,6 +141,12 @@ pub fn extract_symbols_from_tree(
         });
     }
 
+    // Deduplicate: Python's decorated_definition and bare function/class patterns
+    // both match the same symbol. Sort by start_line (ascending) so the decorated
+    // wrapper (earlier line) comes first, then dedup consecutive FQN matches.
+    symbols.sort_by_key(|s| s.start_line);
+    symbols.dedup_by(|b, a| a.fqn == b.fqn);
+
     Ok(symbols)
 }
 
@@ -315,12 +321,22 @@ fn find_capture<'a>(m: &'a QueryMatch<'a, 'a>, idx: u32) -> Option<Node<'a>> {
 
 /// Extracts the UTF-8 text of a node from source bytes.
 fn node_text(node: Node<'_>, source: &[u8]) -> String {
-    node.utf8_text(source).unwrap_or_default().to_owned()
+    match node.utf8_text(source) {
+        Ok(text) => text.to_owned(),
+        Err(e) => {
+            tracing::warn!(
+                "invalid UTF-8 in AST node at byte range {}..{}: {e}",
+                node.start_byte(),
+                node.end_byte()
+            );
+            String::new()
+        }
+    }
 }
 
 /// Determines the symbol kind from the definition node's type.
+#[allow(clippy::match_same_arms)] // explicit function kinds are documentation; wildcard is fallback
 fn determine_kind(node: Node<'_>) -> String {
-    let node_type = node.kind();
     let effective_type = unwrap_definition_node(node);
 
     match effective_type {
@@ -341,17 +357,19 @@ fn determine_kind(node: Node<'_>) -> String {
             "class"
         }
 
-        "interface_declaration" => "interface",
+        "interface_declaration" | "interface_type" => "interface",
 
         "type_alias_declaration"
         | "type_definition"
         | "type_item"
         | "type_declaration"
-        | "type_spec" => "type",
+        | "type_spec"
+        | "delegate_declaration" => "type",
 
         "enum_declaration" | "enum_item" | "enum_specifier" => "enum",
 
-        "struct_item" | "struct_specifier" | "struct_declaration" => "struct",
+        "struct_item" | "struct_specifier" | "struct_declaration" | "struct_type"
+        | "record_declaration" => "struct",
 
         "trait_item" | "trait_declaration" => "trait",
 
@@ -361,10 +379,19 @@ fn determine_kind(node: Node<'_>) -> String {
         | "lexical_declaration"
         | "variable_declaration"
         | "const_item"
-        | "static_item" => "variable",
-
-        // For Go type declarations via the outer node.
-        _ if node_type == "type_declaration" => "type",
+        | "static_item" => {
+            // Check if a variable declaration wraps an arrow function.
+            for i in 0..u32_named_child_count(node) {
+                if let Some(child) = node.named_child(i)
+                    && child.kind() == "variable_declarator"
+                    && let Some(value) = child.child_by_field_name("value")
+                    && matches!(value.kind(), "arrow_function" | "function")
+                {
+                    return "function".to_owned();
+                }
+            }
+            "variable"
+        }
 
         _ => "function",
     }
@@ -394,6 +421,24 @@ fn unwrap_definition_node(node: Node<'_>) -> &str {
         "decorated_definition" => {
             if let Some(def) = node.child_by_field_name("definition") {
                 return unwrap_definition_node(def);
+            }
+            node_type
+        }
+        // Go type_declaration: drill into the type_spec child to find the concrete kind
+        // (struct_type, interface_type, etc.).
+        "type_declaration" => {
+            for i in 0..u32_named_child_count(node) {
+                if let Some(child) = node.named_child(i)
+                    && child.kind() == "type_spec"
+                {
+                    for j in 0..u32_named_child_count(child) {
+                        if let Some(body) = child.named_child(j)
+                            && matches!(body.kind(), "struct_type" | "interface_type")
+                        {
+                            return body.kind();
+                        }
+                    }
+                }
             }
             node_type
         }
@@ -781,4 +826,10 @@ fn collapse_whitespace(s: &str) -> String {
 #[allow(clippy::cast_possible_truncation)] // tree-sitter AST nodes cannot have >4B children
 fn u32_child_count(node: Node<'_>) -> u32 {
     node.child_count() as u32
+}
+
+/// Same as [`u32_child_count`] but for `named_child_count()` → `named_child()`.
+#[allow(clippy::cast_possible_truncation)] // tree-sitter AST nodes cannot have >4B children
+fn u32_named_child_count(node: Node<'_>) -> u32 {
+    node.named_child_count() as u32
 }

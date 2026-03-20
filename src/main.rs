@@ -252,13 +252,26 @@ fn cmd_status(json: bool) -> Result<()> {
 
     let status = ndxr::status::collect_index_status(&conn, &config.db_path)?;
 
-    let indexed_languages: Vec<String> = conn
-        .prepare("SELECT DISTINCT language FROM files ORDER BY language")
-        .and_then(|mut stmt| {
-            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-            Ok(rows.filter_map(Result::ok).collect())
-        })
-        .unwrap_or_default();
+    let indexed_languages: Vec<String> =
+        match conn.prepare("SELECT DISTINCT language FROM files ORDER BY language") {
+            Ok(mut stmt) => {
+                let rows = stmt
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .context("query indexed languages")?;
+                let mut languages = Vec::new();
+                for row in rows {
+                    match row {
+                        Ok(lang) => languages.push(lang),
+                        Err(e) => tracing::warn!("skipping corrupt language row: {e}"),
+                    }
+                }
+                languages
+            }
+            Err(e) => {
+                tracing::warn!("failed to query languages: {e}");
+                Vec::new()
+            }
+        };
     let supported_count = ndxr::languages::all_languages().len();
 
     if json {

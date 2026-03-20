@@ -43,7 +43,6 @@ const CONTAINER_KINDS: &[&str] = &[
     "interface",
     "enum",
     "trait",
-    "impl",
     "module",
     "namespace",
 ];
@@ -51,7 +50,7 @@ const CONTAINER_KINDS: &[&str] = &[
 /// Returns `true` if the given kind is a container that can hold child symbols.
 fn is_container_kind(kind: &str) -> bool {
     let lower = kind.to_lowercase();
-    CONTAINER_KINDS.iter().any(|&k| lower.contains(k))
+    CONTAINER_KINDS.iter().any(|&k| lower == k)
 }
 
 /// Renders a list of symbols from a single file as a skeleton string.

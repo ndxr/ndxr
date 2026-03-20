@@ -127,20 +127,26 @@ fn compress_session(conn: &Connection, session_id: &str) -> Result<()> {
     }
     let summary = unique_headlines.join("; ");
 
+    let tx = conn
+        .unchecked_transaction()
+        .context("begin compress transaction")?;
+
     // Delete auto observations (noisy, low-value).
-    conn.execute(
+    tx.execute(
         "DELETE FROM observations WHERE session_id = ?1 AND kind = 'auto'",
         params![session_id],
     )
     .context("delete auto observations during compression")?;
 
     // Mark session as compressed with extracted metadata.
-    conn.execute(
+    tx.execute(
         "UPDATE sessions SET is_compressed = 1, summary = ?1, key_terms = ?2, key_files = ?3 \
          WHERE id = ?4",
         params![summary, key_terms_str, key_files_str, session_id],
     )
     .context("mark session as compressed")?;
+
+    tx.commit().context("commit compress transaction")?;
 
     Ok(())
 }

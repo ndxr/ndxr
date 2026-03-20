@@ -394,7 +394,9 @@ fn preload_idf(
 ) -> HashMap<String, f64> {
     let mut cache = HashMap::with_capacity(query_tf.len());
     let terms: Vec<&String> = query_tf.keys().collect();
-    let fallback_idf = total_docs.ln();
+    // Terms absent from doc_frequencies are unknown — they provide no signal.
+    // Using 0.0 ensures they don't inflate TF-IDF scores.
+    let fallback_idf = 0.0;
 
     for chunk in terms.chunks(crate::storage::db::BATCH_PARAM_LIMIT) {
         let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();

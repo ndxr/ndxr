@@ -75,12 +75,14 @@ pub struct CapsuleRequest<'a> {
 /// # Errors
 ///
 /// Returns an error if file reading or database queries fail.
+///
+/// The return tuple is `(capsule, memory_budget_tokens)`.
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-pub fn build_capsule(req: &CapsuleRequest<'_>) -> Result<Capsule> {
+pub fn build_capsule(req: &CapsuleRequest<'_>) -> Result<(Capsule, usize)> {
     let intent_name = req.intent.name().to_owned();
 
     // 1. Budget allocation.
@@ -126,15 +128,18 @@ pub fn build_capsule(req: &CapsuleRequest<'_>) -> Result<Capsule> {
         relaxation_applied: false,
     };
 
-    Ok(Capsule {
-        intent: stats.intent.clone(),
-        query: req.query.to_string(),
-        pivots,
-        skeletons,
-        memories: Vec::new(),
-        impact_hints: Vec::new(),
-        stats,
-    })
+    Ok((
+        Capsule {
+            intent: stats.intent.clone(),
+            query: req.query.to_string(),
+            pivots,
+            skeletons,
+            memories: Vec::new(),
+            impact_hints: Vec::new(),
+            stats,
+        },
+        memory_budget,
+    ))
 }
 
 /// Selects and reads pivot files from the highest-scoring search results.
@@ -259,7 +264,14 @@ fn build_skeletons(
     let mut skeletons = Vec::new();
     let mut tokens_used = 0;
 
-    let skeleton_data = reducer::render_skeletons(req.conn, &file_order, false)?;
+    // Re-sort skeleton files by BFS depth (shallowest first) so the budget
+    // loop prioritizes the most closely related neighbors.
+    let mut skeleton_data = reducer::render_skeletons(req.conn, &file_order, false)?;
+    skeleton_data.sort_by_key(|skel| {
+        adjacent_by_file
+            .get(&skel.path)
+            .map_or(usize::MAX, |(_, depth)| *depth)
+    });
     for skel in skeleton_data {
         let skel_tokens = req.estimator.estimate(&skel.content);
         if tokens_used + skel_tokens > budget {

@@ -219,17 +219,18 @@ fn full_pipeline_integration() {
 
     // 5. Build capsule — verify token budget respected
     let estimator = ndxr::config::TokenEstimator::default();
-    let capsule = ndxr::capsule::builder::build_capsule(&ndxr::capsule::builder::CapsuleRequest {
-        conn: &conn,
-        graph: &graph,
-        search_results: &results,
-        query: "authentication",
-        intent: &ndxr::graph::intent::Intent::Explore,
-        token_budget: 8000,
-        estimator: &estimator,
-        workspace_root: &config.workspace_root,
-    })
-    .unwrap();
+    let (capsule, _memory_budget) =
+        ndxr::capsule::builder::build_capsule(&ndxr::capsule::builder::CapsuleRequest {
+            conn: &conn,
+            graph: &graph,
+            search_results: &results,
+            query: "authentication",
+            intent: &ndxr::graph::intent::Intent::Explore,
+            token_budget: 8000,
+            estimator: &estimator,
+            workspace_root: &config.workspace_root,
+        })
+        .unwrap();
     assert!(capsule.stats.tokens_used <= capsule.stats.tokens_budget);
     // No file in both pivots and skeletons
     let pivot_paths: HashSet<_> = capsule.pivots.iter().map(|p| &p.path).collect();
@@ -297,9 +298,16 @@ export interface JwtPayload {
     );
 
     // 10. Search memory — verify observation surfaces
-    let mem_results =
-        ndxr::memory::search::search_memories(&conn, "JWT authentication", &[], 10, true, 7.0)
-            .unwrap();
+    let mem_results = ndxr::memory::search::search_memories(
+        &conn,
+        "JWT authentication",
+        &[],
+        10,
+        true,
+        7.0,
+        None,
+    )
+    .unwrap();
     assert!(
         !mem_results.is_empty(),
         "memory search should find the observation"

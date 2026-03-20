@@ -39,6 +39,22 @@ const IMPORT_QUERY: &str = "
 
 (namespace_use_declaration
   (namespace_name) @source)
+
+(expression_statement
+  (require_expression
+    (string (string_content) @source)))
+
+(expression_statement
+  (require_once_expression
+    (string (string_content) @source)))
+
+(expression_statement
+  (include_expression
+    (string (string_content) @source)))
+
+(expression_statement
+  (include_once_expression
+    (string (string_content) @source)))
 ";
 
 const CALL_QUERY: &str = "

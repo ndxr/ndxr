@@ -352,9 +352,9 @@ impl NdxrServer {
                 pipeline.capsule.memories.len()
             ),
         };
-        commit_tool_record(&conn_guard, &self.session_id, &record);
-
         drop(graph_guard);
+
+        commit_tool_record(&conn_guard, &self.session_id, &record);
         drop(conn_guard);
 
         to_json_result(&pipeline.capsule)
@@ -406,9 +406,9 @@ impl NdxrServer {
                 pipeline.capsule.skeletons.len()
             ),
         };
-        commit_tool_record(&conn_guard, &self.session_id, &record);
-
         drop(graph_guard);
+
+        commit_tool_record(&conn_guard, &self.session_id, &record);
         drop(conn_guard);
 
         to_json_result(&pipeline.capsule)
@@ -544,9 +544,9 @@ impl NdxrServer {
                 "{total_callers} callers, {callees_count} callees, blast={blast_radius}"
             ),
         };
-        commit_tool_record(&conn_guard, &self.session_id, &record);
-
         drop(graph_guard);
+
+        commit_tool_record(&conn_guard, &self.session_id, &record);
         drop(conn_guard);
 
         to_json_result(&result)
@@ -577,10 +577,11 @@ impl NdxrServer {
             limit,
             include_stale,
             self.engine.config.recency_half_life_days,
+            params.0.kind.as_deref(),
         )
         .map_err(|e| rmcp::ErrorData::internal_error(format!("memory search failed: {e}"), None))?;
 
-        let mut output: Vec<MemorySearchResult> = results
+        let output: Vec<MemorySearchResult> = results
             .into_iter()
             .map(|m| MemorySearchResult {
                 id: m.observation.id,
@@ -593,10 +594,6 @@ impl NdxrServer {
                 linked_fqns: m.linked_fqns,
             })
             .collect();
-
-        if let Some(ref kind_filter) = params.0.kind {
-            output.retain(|r| r.kind == *kind_filter);
-        }
 
         drop(conn_guard);
 
@@ -912,7 +909,7 @@ fn run_capsule_pipeline(
         estimator: &estimator,
         workspace_root,
     };
-    let mut capsule = builder::build_capsule(&req)
+    let (mut capsule, memory_budget) = builder::build_capsule(&req)
         .map_err(|e| rmcp::ErrorData::internal_error(format!("capsule build failed: {e}"), None))?;
 
     let pivot_fqns: Vec<String> = results.iter().map(|r| r.fqn.clone()).collect();
@@ -923,17 +920,23 @@ fn run_capsule_pipeline(
         DEFAULT_MEMORY_LIMIT,
         false,
         recency_half_life_days,
+        None,
     )
     .map_err(|e| rmcp::ErrorData::internal_error(format!("memory search failed: {e}"), None))?;
 
-    capsule.memories = memories.iter().map(memory_entry_from).collect();
+    let mut tokens_memories = 0;
+    for memory in &memories {
+        let entry = memory_entry_from(memory);
+        let entry_tokens = estimator.estimate(&entry.content);
+        if tokens_memories + entry_tokens > memory_budget {
+            break;
+        }
+        tokens_memories += entry_tokens;
+        capsule.memories.push(entry);
+    }
     capsule.stats.memory_count = capsule.memories.len();
-    capsule.stats.tokens_memories = capsule
-        .memories
-        .iter()
-        .map(|m| estimator.estimate(&m.content))
-        .sum();
-    capsule.stats.tokens_used += capsule.stats.tokens_memories;
+    capsule.stats.tokens_memories = tokens_memories;
+    capsule.stats.tokens_used += tokens_memories;
     capsule.stats.search_time_ms = search_time_ms;
     capsule.stats.relaxation_applied = relaxation_applied;
 

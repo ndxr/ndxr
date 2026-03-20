@@ -29,7 +29,15 @@ const SYMBOL_QUERY: &str = "
   trait: (type_identifier) @name) @definition
 
 (impl_item
+  trait: (generic_type
+    type: (type_identifier) @name)) @definition
+
+(impl_item
   type: (type_identifier) @name) @definition
+
+(impl_item
+  type: (generic_type
+    type: (type_identifier) @name)) @definition
 
 (type_item
   name: (type_identifier) @name) @definition

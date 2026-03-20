@@ -22,6 +22,22 @@ const SYMBOL_QUERY: &str = "
     declarator: (qualified_identifier
       name: (identifier) @name))) @definition
 
+(function_definition
+  declarator: (pointer_declarator
+    declarator: (function_declarator
+      declarator: (identifier) @name))) @definition
+
+(function_definition
+  declarator: (pointer_declarator
+    declarator: (function_declarator
+      declarator: (qualified_identifier
+        name: (identifier) @name)))) @definition
+
+(function_definition
+  declarator: (reference_declarator
+    (function_declarator
+      declarator: (identifier) @name))) @definition
+
 (declaration
   declarator: (function_declarator
     declarator: (identifier) @name)) @definition
