@@ -5,6 +5,34 @@ All notable changes to ndxr will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-03-20
+
+### Added
+
+- Pass `intent` to `run_pipeline` and `get_context_capsule` to get context optimized for your task (debug, test, refactor, modify, understand, explore)
+- `ndxr setup` now documents all six intents with a usage table in CLAUDE.md so Claude Code knows when and how to use them
+- Rust generic impl patterns, Go struct/interface classification, TS/JS arrow function detection, C++ pointer/reference declarators, Python decorated definition dedup, PHP require/include imports, C# record and delegate declarations, Zig test declaration names
+
+### Improved
+
+- Context capsules are now shaped by intent — refactoring gets broader structural context (more skeletons), debugging gets deeper error-path tracing, understanding includes docstrings in skeletons
+- BFS expansion depth adapts to intent: depth 3 for debug/refactor (catches error propagation and blast radius), depth 2 for others
+- File watcher uses true deadline-based debounce instead of interval polling, skips graph rebuild on index error
+- Memory search results are now sorted by score; session compression is wrapped in a transaction
+- Skeletons are sorted by BFS depth so the most closely related neighbors appear first
+
+### Fixed
+
+- Race condition between INSERT OR IGNORE and last_insert_rowid in indexer pipeline
+- Silent data loss from filter_map(Result::ok) on database queries — errors are now logged
+- Edge resolver now discriminates QueryReturnedNoRows from real errors
+- IDF returns zero for unknown terms instead of producing incorrect scores
+- Score normalization handles equal values correctly (returns zero instead of NaN)
+- Memory recency_half_life_days is validated before use
+- MCP server drops graph read lock before committing tool records (prevents lock ordering issues)
+- Skeleton renderer uses exact container kind matching instead of substring
+- `unix_now()` uses safe fallback instead of expect()
+
 ## [0.2.0] - 2026-03-19
 
 ### Improved
