@@ -87,7 +87,7 @@ query → FTS5 candidates (BM25) → enrich with TF-IDF + centrality → intent-
 - **TF-IDF cosine similarity** — measures semantic overlap between the query and the symbol's term frequency vector. Good at "find code related to authentication" even if the exact word doesn't appear.
 - **PageRank centrality** — structural importance in the dependency graph. A function called by many others is more likely to be relevant for refactoring or understanding.
 
-**Intent detection** adjusts the weights between these signals. A "fix the auth bug" query (intent: Debug) weights BM25 heavily (find the exact error). A "refactor the auth system" query (intent: Refactor) weights centrality heavily (find high-impact symbols). See `graph/intent.rs` for the keyword lists and weight tables.
+**Intent detection** adjusts the weights between these signals. A "fix the auth bug" query (intent: Debug) weights BM25 heavily (find the exact error). A "refactor the auth system" query (intent: Refactor) weights centrality heavily (find high-impact symbols). Intent can be auto-detected from the query or explicitly passed via the `intent` parameter on `run_pipeline` and `get_context_capsule`. See `graph/intent.rs` for the keyword lists, weight tables, and `CapsuleHints`.
 
 **Batch enrichment** — all per-candidate data (symbol metadata, term frequencies, IDF values) is loaded in batch via `WHERE IN (...)` queries before the scoring loop. No N+1 queries.
 
@@ -99,9 +99,9 @@ The capsule packs search results into a token budget:
 search results → budget allocation → pivot files (full source) + skeletons (signatures) + memory
 ```
 
-**Budget allocation** splits the total token budget into three pools: a small slice for memory entries, most of the remainder for pivot files (full source), and the rest for skeleton context. Constants in `capsule/builder.rs` control the ratios.
+**Budget allocation** splits the total token budget into three pools: a small slice for memory entries, most of the remainder for pivot files (full source), and the rest for skeleton context. The pivot/skeleton ratio and BFS depth are intent-dependent via `CapsuleHints` in `graph/intent.rs` — e.g., Refactor allocates 30% to skeletons (vs 15% default) for broader structural visibility.
 
-**BFS expansion** discovers adjacent symbols by traversing the dependency graph from pivot symbols (both callers and callees, depth 2). These adjacent files are rendered as signature-only skeletons, giving the agent structural context without consuming too many tokens.
+**BFS expansion** discovers adjacent symbols by traversing the dependency graph from pivot symbols (both callers and callees). Expansion depth is intent-dependent: Debug and Refactor use depth 3 to catch error propagation paths and blast radius; other intents use depth 2. Adjacent files are rendered as signature-only skeletons (with optional docstrings for Understand intent).
 
 **Invariants:** no file appears in both pivots and skeletons, and `tokens_used` never exceeds `tokens_budget`.
 

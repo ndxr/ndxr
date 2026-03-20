@@ -60,6 +60,7 @@ CLI (clap)  /  MCP Server (rmcp, stdio)
 | `src/indexer/mod.rs` | `index()` / `reindex()` / `index_paths()` — full indexing pipeline |
 | `src/mcp/server.rs` | MCP server with 8 tools, `CoreEngine`, `run_capsule_pipeline()`, `commit_tool_record()` |
 | `src/graph/search.rs` | `hybrid_search()` — FTS5 BM25 + TF-IDF + centrality + intent scoring |
+| `src/graph/intent.rs` | `get_capsule_hints()` — intent-specific BFS depth, pivot fraction, skeleton docs |
 | `src/capsule/builder.rs` | `build_capsule()` — token-budgeted context packing with BFS expansion |
 | `src/languages/mod.rs` | `get_language_config()` — 13 languages (14 grammars), tree-sitter queries |
 | `src/storage/db.rs` | `open_or_create()`, `BATCH_PARAM_LIMIT` — SQLite schema, WAL, pragmas, migrations |
@@ -177,6 +178,7 @@ Every `.rs` file follows this top-to-bottom order. **Never mix sections.**
 - `unix_now()` → `util.rs` | `parse_intent()` → `graph::intent` | `build_fts_query()` → `indexer::tokenizer`
 - `BATCH_PARAM_LIMIT` → `storage/db.rs` | `collect_index_status()` → `status.rs`
 - `run_capsule_pipeline()` / `commit_tool_record()` → `mcp/server.rs`
+- `get_capsule_hints()` → `graph/intent.rs` | `CapsuleHints` default values live here only
 - Test helpers → `tests/helpers/mod.rs`
 - `u32_child_count()` / `u32_named_child_count()` → `indexer/symbols.rs` (tree-sitter `u32` ↔ `usize` bridge)
 
@@ -201,13 +203,14 @@ Every `.rs` file follows this top-to-bottom order. **Never mix sections.**
 | `DEFAULT_MAX_FILE_SIZE` | 1 MiB | indexer/walker.rs |
 | `BATCH_PARAM_LIMIT` | 900 | storage/db.rs |
 | `FTS_CANDIDATE_LIMIT` | 100 / 50 | graph/search.rs / memory/search.rs |
-| `BFS_MAX_DEPTH` | 2 | capsule/builder.rs |
+| `CapsuleHints.bfs_depth` | 2–3 (intent-dependent) | graph/intent.rs |
 | `MAX_IMPACT_DEPTH` | 10 | mcp/server.rs |
 | `MAX_MEMORY_LIMIT` | 50 | mcp/server.rs |
 | `MAX_SESSION_COUNT` | 20 | mcp/server.rs |
 | `MAX_OBSERVATION_CONTENT` | 64 KiB | mcp/server.rs |
 | `DAMPING_FACTOR` / `ITERATIONS` | 0.85 / 100 | graph/centrality.rs |
-| `MEMORY_FRACTION` / `PIVOT_FRACTION` | 0.10 / 0.85 | capsule/builder.rs |
+| `MEMORY_FRACTION` | 0.10 | capsule/builder.rs |
+| `CapsuleHints.pivot_fraction` | 0.70–0.85 (intent-dependent) | graph/intent.rs |
 | BM25 weights | name=10, fqn=5, doc=1, sig=3 | graph/search.rs |
 
 ## MCP Tools
@@ -235,6 +238,7 @@ Every `.rs` file follows this top-to-bottom order. **Never mix sections.**
 - **Edition 2024 let-chains** — `if let Ok(x) = foo() && let Ok(y) = bar(x)` used throughout
 - **tree-sitter `named_child(u32)` vs `named_child_count() -> usize`** — use `u32_named_child_count()` helper in `symbols.rs`. When adding language query patterns, verify node types against `node-types.json` in the cargo registry, don't assume names
 - **Clippy `ignored_unit_patterns`** — `tokio::select!` arms must use `() = async { ... }` not `_ = async { ... }`
+- **Clippy `double_must_use`** — if a struct is `#[must_use]`, functions returning it must NOT also be `#[must_use]` (denied under `clippy::all`)
 
 ## Commit Convention
 

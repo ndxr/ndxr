@@ -180,6 +180,7 @@ mod tests {
             w_tfidf: 0.3,
             w_centrality: 0.3,
             boosts: vec![],
+            capsule_hints: crate::graph::intent::CapsuleHints::default(),
         };
         let score = compute_hybrid_score(1.0, 1.0, 1.0, 0.0, &weights);
         assert!((score - 1.0).abs() < 1e-10);
@@ -192,6 +193,7 @@ mod tests {
             w_tfidf: 0.3,
             w_centrality: 0.3,
             boosts: vec![],
+            capsule_hints: crate::graph::intent::CapsuleHints::default(),
         };
         let score = compute_hybrid_score(1.0, 1.0, 1.0, 0.5, &weights);
         assert!((score - 1.5).abs() < 1e-10);

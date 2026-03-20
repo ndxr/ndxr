@@ -123,7 +123,7 @@ For a deeper dive into internals, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.m
 
 | Tool | Description |
 |------|-------------|
-| `run_pipeline` | **Start here.** Full pipeline: detect intent, search, build capsule, recall memory, generate impact hints. |
+| `run_pipeline` | **Start here.** Full pipeline: search, build capsule, recall memory, generate impact hints. Pass `intent` (debug/test/refactor/modify/understand/explore) for optimized results. |
 | `get_context_capsule` | Follow-up context query. Search + capsule + memory, without impact hints. |
 | `get_skeleton` | Render files as signature-only structural outlines. Great for understanding file structure. |
 | `get_impact_graph` | Show callers, callees, and blast radius for a symbol. Use before refactoring. |

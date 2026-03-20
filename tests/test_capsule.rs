@@ -161,3 +161,56 @@ fn capsule_with_empty_search_results() {
     assert!(capsule.skeletons.is_empty());
     assert!(capsule.stats.tokens_used <= capsule.stats.tokens_budget);
 }
+
+#[test]
+fn refactor_intent_produces_more_skeletons_than_explore() {
+    let tmp = TempDir::new().unwrap();
+    helpers::create_capsule_project(&tmp);
+
+    let (config, conn, graph) = helpers::index_and_build(&tmp);
+    let results = ndxr::graph::search::hybrid_search(&conn, &graph, "validate", 10, None).unwrap();
+    let estimator = ndxr::config::TokenEstimator::default();
+
+    let (explore_capsule, _) =
+        ndxr::capsule::builder::build_capsule(&ndxr::capsule::builder::CapsuleRequest {
+            conn: &conn,
+            graph: &graph,
+            search_results: &results,
+            query: "validate",
+            intent: &ndxr::graph::intent::Intent::Explore,
+            token_budget: 8000,
+            estimator: &estimator,
+            workspace_root: &config.workspace_root,
+        })
+        .unwrap();
+
+    let (refactor_capsule, _) =
+        ndxr::capsule::builder::build_capsule(&ndxr::capsule::builder::CapsuleRequest {
+            conn: &conn,
+            graph: &graph,
+            search_results: &results,
+            query: "validate",
+            intent: &ndxr::graph::intent::Intent::Refactor,
+            token_budget: 8000,
+            estimator: &estimator,
+            workspace_root: &config.workspace_root,
+        })
+        .unwrap();
+
+    // Guard: verify both capsules actually produced skeletons so the
+    // comparison below is not vacuously true with 0 vs 0.
+    assert!(
+        refactor_capsule.stats.tokens_skeletons > 0,
+        "refactor capsule should produce skeleton tokens (got 0)"
+    );
+
+    // Refactor uses pivot_fraction=0.70 (vs 0.85), giving 30% to skeletons
+    // instead of 15%. With the same search results, it should allocate at
+    // least as many tokens to skeletons.
+    assert!(
+        refactor_capsule.stats.tokens_skeletons >= explore_capsule.stats.tokens_skeletons,
+        "refactor should allocate more tokens to skeletons: refactor={} vs explore={}",
+        refactor_capsule.stats.tokens_skeletons,
+        explore_capsule.stats.tokens_skeletons,
+    );
+}

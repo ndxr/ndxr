@@ -475,9 +475,25 @@ ndxr indexes this codebase and provides you with only the relevant code for each
 **Before modifying any file**, call `mcp__ndxr__run_pipeline` with a description of your task.
 Do not read files directly unless run_pipeline tells you to.
 
-Available tools:
-- `mcp__ndxr__run_pipeline` -- use this FIRST for every task
-- `mcp__ndxr__get_context_capsule` -- follow-up context queries
+### Intent
+
+Pass `intent` to `run_pipeline` to get optimized context for your task:
+
+| Intent | When to use | What it optimizes |
+|--------|------------|-------------------|
+| `debug` | Fixing bugs, errors, crashes | Error paths, high-connectivity code |
+| `test` | Writing or finding tests | Test files, test fixtures |
+| `refactor` | Restructuring, renaming | Public APIs, blast radius, callers |
+| `modify` | Adding features, extending | Balanced text + semantic match |
+| `understand` | Learning how code works | Documentation, module structure, entry points |
+| `explore` | General browsing (default) | Documented, central code |
+
+Example: `mcp__ndxr__run_pipeline({ task: \"fix the auth crash\", intent: \"debug\" })`
+
+### Tools
+
+- `mcp__ndxr__run_pipeline` -- use this FIRST for every task (pass intent for best results)
+- `mcp__ndxr__get_context_capsule` -- follow-up context queries (also accepts intent)
 - `mcp__ndxr__get_skeleton` -- get file signatures without bodies
 - `mcp__ndxr__get_impact_graph` -- check blast radius before refactoring
 - `mcp__ndxr__search_memory` -- search past session insights

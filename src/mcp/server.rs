@@ -218,6 +218,8 @@ struct RunPipelineParams {
     task: String,
     /// Token budget for the response (default: 8000).
     max_tokens: Option<usize>,
+    /// Override auto-detected intent (debug, test, refactor, modify, understand, explore).
+    intent: Option<String>,
 }
 
 /// Parameters for the `get_context_capsule` tool.
@@ -305,7 +307,7 @@ impl NdxrServer {
     /// Full pipeline: detect intent, search, build capsule, recall memory,
     /// generate impact hints, auto-capture, and return JSON.
     #[tool(
-        description = "Run the full ndxr pipeline: detect intent from task description, search the codebase, build a context capsule with full source for pivots and skeletons for adjacent files, recall relevant memories, and generate impact hints. Returns a comprehensive JSON context package."
+        description = "Run the full ndxr pipeline: search the codebase, build a context capsule with full source for pivots and skeletons for adjacent files, recall relevant memories, and generate impact hints. Optionally pass intent to optimize results (debug, test, refactor, modify, understand, explore). Returns a comprehensive JSON context package."
     )]
     async fn run_pipeline(
         &self,
@@ -325,7 +327,12 @@ impl NdxrServer {
             .as_ref()
             .ok_or_else(|| rmcp::ErrorData::internal_error("symbol graph not initialized", None))?;
 
-        let intent = intent::detect_intent(query);
+        let intent = params
+            .0
+            .intent
+            .as_deref()
+            .and_then(intent::parse_intent)
+            .unwrap_or_else(|| intent::detect_intent(query));
 
         let mut pipeline = run_capsule_pipeline(
             &conn_guard,
@@ -362,7 +369,7 @@ impl NdxrServer {
 
     /// Search the codebase and build a context capsule (no impact hints).
     #[tool(
-        description = "Search the codebase and build a context capsule with pivot files (full source) and skeleton files (signatures only). Includes memory recall. Does not generate impact hints. Returns JSON."
+        description = "Search the codebase and build a context capsule with pivot files (full source) and skeleton files (signatures only). Includes memory recall. Optionally pass intent to optimize results (debug, test, refactor, modify, understand, explore). Does not generate impact hints. Returns JSON."
     )]
     async fn get_context_capsule(
         &self,

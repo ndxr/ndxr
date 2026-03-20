@@ -16,7 +16,7 @@ use rusqlite::Connection;
 use super::{BlastRadius, Capsule, CapsuleStats, ImpactHint, PivotFile, PivotSymbol, SkeletonFile};
 use crate::config::TokenEstimator;
 use crate::graph::builder::SymbolGraph;
-use crate::graph::intent::Intent;
+use crate::graph::intent::{Intent, get_capsule_hints};
 use crate::graph::search::SearchResult;
 use crate::skeleton::reducer;
 use crate::storage::db::BATCH_PARAM_LIMIT;
@@ -26,12 +26,6 @@ const MAX_MEMORY_TOKENS: f64 = 500.0;
 
 /// Fraction of total budget reserved for memory.
 const MEMORY_FRACTION: f64 = 0.10;
-
-/// Fraction of remaining budget allocated to pivots.
-const PIVOT_FRACTION: f64 = 0.85;
-
-/// Maximum BFS expansion depth from pivot symbols.
-const BFS_MAX_DEPTH: usize = 2;
 
 /// Groups all parameters needed to build a capsule.
 ///
@@ -60,12 +54,13 @@ pub struct CapsuleRequest<'a> {
 ///
 /// # Pipeline
 ///
-/// 1. Deduplicate pivots by file
-/// 2. BFS expand from pivot symbols (depth 2)
-/// 3. Reserve memory budget: `min(total * 0.10, 500)`
-/// 4. Fill pivots (85% of remaining budget)
-/// 5. Fill skeletons (15% of remaining, plus overflow from pivots)
-/// 6. Assemble capsule
+/// 1. Fetch intent-specific capsule hints (BFS depth, pivot fraction, skeleton docs)
+/// 2. Deduplicate pivots by file
+/// 3. BFS expand from pivot symbols (depth from intent hints)
+/// 4. Reserve memory budget: `min(total * 0.10, 500)`
+/// 5. Fill pivots (pivot fraction from intent hints)
+/// 6. Fill skeletons (remaining budget, plus overflow from pivots)
+/// 7. Assemble capsule
 ///
 /// # Invariants
 ///
@@ -84,12 +79,13 @@ pub struct CapsuleRequest<'a> {
 )]
 pub fn build_capsule(req: &CapsuleRequest<'_>) -> Result<(Capsule, usize)> {
     let intent_name = req.intent.name().to_owned();
+    let hints = get_capsule_hints(req.intent);
 
     // 1. Budget allocation.
     let memory_budget =
         ((req.token_budget as f64) * MEMORY_FRACTION).min(MAX_MEMORY_TOKENS) as usize;
     let remaining = req.token_budget.saturating_sub(memory_budget);
-    let pivot_budget = (remaining as f64 * PIVOT_FRACTION) as usize;
+    let pivot_budget = (remaining as f64 * hints.pivot_fraction) as usize;
     let skeleton_budget = remaining.saturating_sub(pivot_budget);
 
     // 2. Cache the canonical workspace root (avoids re-canonicalizing per file).
@@ -108,6 +104,8 @@ pub fn build_capsule(req: &CapsuleRequest<'_>) -> Result<(Capsule, usize)> {
         req,
         &pivot_files_set,
         skeleton_budget + pivot_budget.saturating_sub(tokens_pivots),
+        hints.bfs_depth,
+        hints.include_skeleton_docs,
     )?;
 
     // 5. Assemble capsule.
@@ -217,6 +215,8 @@ fn build_skeletons(
     req: &CapsuleRequest<'_>,
     pivot_paths: &HashSet<String>,
     budget: usize,
+    bfs_depth: usize,
+    include_docs: bool,
 ) -> Result<(Vec<SkeletonFile>, usize)> {
     let pivot_nodes: Vec<NodeIndex> = req
         .search_results
@@ -225,7 +225,7 @@ fn build_skeletons(
         .filter_map(|r| req.graph.id_to_node.get(&r.symbol_id).copied())
         .collect();
 
-    let adjacent = bfs_expand(req.graph, &pivot_nodes, BFS_MAX_DEPTH);
+    let adjacent = bfs_expand(req.graph, &pivot_nodes, bfs_depth);
 
     // Collect all symbol IDs from BFS results for a single batch query.
     let sym_entries: Vec<(i64, usize)> = adjacent
@@ -266,7 +266,7 @@ fn build_skeletons(
 
     // Re-sort skeleton files by BFS depth (shallowest first) so the budget
     // loop prioritizes the most closely related neighbors.
-    let mut skeleton_data = reducer::render_skeletons(req.conn, &file_order, false)?;
+    let mut skeleton_data = reducer::render_skeletons(req.conn, &file_order, include_docs)?;
     skeleton_data.sort_by_key(|skel| {
         adjacent_by_file
             .get(&skel.path)
