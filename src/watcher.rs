@@ -7,13 +7,11 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::Result;
-use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
-use tokio::sync::Mutex;
-
 use crate::graph::builder::SymbolGraph;
 use crate::languages;
 use crate::mcp::server::CoreEngine;
+use anyhow::Result;
+use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 
 /// Active file watcher that monitors the workspace for changes.
 ///
@@ -66,62 +64,69 @@ impl FileWatcher {
         // Spawn debounce + re-index task.
         let ws_root = workspace_root.clone();
         tokio::spawn(async move {
-            let pending: Mutex<HashSet<PathBuf>> = Mutex::new(HashSet::new());
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(debounce_ms));
+            let mut pending: HashSet<PathBuf> = HashSet::new();
+            let mut debounce_deadline: Option<tokio::time::Instant> = None;
 
             loop {
                 tokio::select! {
                     _ = &mut shutdown_rx => break,
                     Some(event) = event_rx.recv() => {
-                        let mut pending_lock = pending.lock().await;
                         for path in event.paths {
                             if should_process_path(&ws_root, &path) {
-                                pending_lock.insert(path);
+                                pending.insert(path);
                             }
                         }
+                        // Reset the debounce deadline on every new event.
+                        debounce_deadline = Some(
+                            tokio::time::Instant::now()
+                                + std::time::Duration::from_millis(debounce_ms)
+                        );
                     }
-                    _ = interval.tick() => {
-                        let mut pending_lock = pending.lock().await;
-                        if pending_lock.is_empty() {
-                            drop(pending_lock);
-                        } else {
-                            let paths: Vec<PathBuf> = pending_lock.drain().collect();
-                            drop(pending_lock);
-                            // Targeted re-index of only the changed files via
-                            // spawn_blocking since the indexer is synchronous.
-                            // The closure returns the rebuilt graph so it can be
-                            // stored in the async context via write().await,
-                            // ensuring graph updates are never dropped.
-                            let engine_clone = engine.clone();
-                            let graph_result = tokio::task::spawn_blocking(move || {
-                                match crate::indexer::index_paths(&engine_clone.config, &paths) {
-                                    Ok(stats) => {
-                                        if stats.files_indexed > 0 || stats.files_deleted > 0 {
-                                            tracing::info!(
-                                                indexed = stats.files_indexed,
-                                                deleted = stats.files_deleted,
-                                                skipped = stats.skipped,
-                                                "watcher re-index complete"
-                                            );
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::error!("Watcher re-index failed: {e}");
+                    () = async {
+                        match debounce_deadline {
+                            Some(deadline) => tokio::time::sleep_until(deadline).await,
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => {
+                        debounce_deadline = None;
+
+                        if pending.is_empty() {
+                            continue;
+                        }
+
+                        let paths: Vec<PathBuf> = pending.drain().collect();
+                        let engine_clone = engine.clone();
+                        let graph_result = tokio::task::spawn_blocking(move || {
+                            match crate::indexer::index_paths(&engine_clone.config, &paths) {
+                                Ok(stats) => {
+                                    if stats.files_indexed > 0 || stats.files_deleted > 0 {
+                                        tracing::info!(
+                                            indexed = stats.files_indexed,
+                                            deleted = stats.files_deleted,
+                                            skipped = stats.skipped,
+                                            "watcher re-index complete"
+                                        );
                                     }
                                 }
-                                // Rebuild the graph + PageRank on a fresh connection.
-                                // `index_paths` skips graph computation (to avoid
-                                // duplicate work), so this is the single place the
-                                // graph is built after a watcher-triggered re-index.
-                                rebuild_graph(&engine_clone.config.db_path)
-                            }).await;
+                                Err(e) => {
+                                    tracing::error!("watcher re-index failed: {e}");
+                                    // Skip graph rebuild — DB may be in inconsistent state.
+                                    return None;
+                                }
+                            }
+                            rebuild_graph(&engine_clone.config.db_path)
+                        }).await;
 
-                            // Store the rebuilt graph in CoreEngine, waiting for any
-                            // in-progress reads to finish. This ensures graph updates
-                            // are ALWAYS applied (unlike the previous try_lock approach).
-                            if let Ok(Some(graph)) = graph_result {
+                        match graph_result {
+                            Ok(Some(graph)) => {
                                 let mut graph_lock = engine.graph.write().await;
                                 *graph_lock = Some(graph);
+                            }
+                            Ok(None) => {
+                                tracing::warn!("watcher: graph rebuild skipped or failed");
+                            }
+                            Err(e) => {
+                                tracing::error!("watcher: spawn_blocking panicked: {e}");
                             }
                         }
                     }

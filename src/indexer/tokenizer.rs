@@ -411,4 +411,16 @@ mod tests {
             vec!["std", "collections", "hash", "map"]
         );
     }
+
+    #[test]
+    fn stop_words_are_sorted() {
+        for window in STOP_WORDS.windows(2) {
+            assert!(
+                window[0] < window[1],
+                "STOP_WORDS not sorted: {:?} >= {:?}",
+                window[0],
+                window[1]
+            );
+        }
+    }
 }

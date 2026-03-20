@@ -488,8 +488,8 @@ fn scoring_normalize_identical_values() {
     assert_eq!(normalized.len(), 5);
     for (i, v) in normalized.iter().enumerate() {
         assert!(
-            (*v - 1.0).abs() < f64::EPSILON,
-            "all identical values should normalize to 1.0, index {i} got {v}"
+            v.abs() < f64::EPSILON,
+            "all identical values should normalize to 0.0, index {i} got {v}"
         );
     }
 }
@@ -499,8 +499,8 @@ fn scoring_normalize_single_value() {
     let normalized = ndxr::graph::scoring::normalize_min_max(&[42.0]);
     assert_eq!(normalized.len(), 1);
     assert!(
-        (normalized[0] - 1.0).abs() < f64::EPSILON,
-        "single value should normalize to 1.0, got {}",
+        normalized[0].abs() < f64::EPSILON,
+        "single value should normalize to 0.0, got {}",
         normalized[0]
     );
 }

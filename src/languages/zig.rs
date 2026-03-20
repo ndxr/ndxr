@@ -19,7 +19,8 @@ const SYMBOL_QUERY: &str = "
 (variable_declaration
   (identifier) @name) @definition
 
-(test_declaration) @definition
+(test_declaration
+  (string (string_content) @name)) @definition
 ";
 
 const IMPORT_QUERY: &str = "

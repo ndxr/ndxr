@@ -226,7 +226,7 @@ fn capsule_has_pivots() {
         workspace_root: &config.workspace_root,
     };
 
-    let capsule = builder::build_capsule(&req).unwrap();
+    let (capsule, _memory_budget) = builder::build_capsule(&req).unwrap();
 
     assert!(
         !capsule.pivots.is_empty(),
@@ -284,7 +284,7 @@ fn save_and_search_observation_roundtrip() {
 
     // Search for the observation.
     let results =
-        mem_search::search_memories(&conn, "JWT authentication", &[], 5, false, 7.0).unwrap();
+        mem_search::search_memories(&conn, "JWT authentication", &[], 5, false, 7.0, None).unwrap();
 
     assert!(
         !results.is_empty(),

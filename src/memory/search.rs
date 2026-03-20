@@ -64,10 +64,13 @@ pub fn search_memories(
     limit: usize,
     include_stale: bool,
     recency_half_life_days: f64,
+    kind: Option<&str>,
 ) -> Result<Vec<MemoryResult>> {
     if query.trim().is_empty() {
         return Ok(Vec::new());
     }
+
+    let recency_half_life_days = recency_half_life_days.max(f64::EPSILON);
 
     // 1. Collect FTS5 candidates with BM25 scores.
     let candidates = fts_candidates(conn, query)?;
@@ -107,7 +110,7 @@ pub fn search_memories(
 
         // a) BM25 normalised.
         let bm25_norm = if (bm25_max - bm25_min).abs() < f64::EPSILON {
-            1.0
+            0.0
         } else {
             (raw_bm25 - bm25_min) / (bm25_max - bm25_min)
         };
@@ -118,7 +121,7 @@ pub fn search_memories(
         let tfidf_cosine = cosine_similarity(&query_tf, &obs_tf);
 
         // c) Recency decay.
-        let age_days = (now_secs - obs.created_at) as f64 / 86400.0;
+        let age_days = (now_secs - obs.created_at).max(0) as f64 / 86400.0;
         let recency = 0.5_f64.powf(age_days / recency_half_life_days);
 
         // d) Proximity: fraction of observation's linked FQNs that appear in pivot_fqns.
@@ -149,8 +152,11 @@ pub fn search_memories(
         });
     }
 
-    // 6. Sort by score descending and truncate.
+    // 6. Sort by score descending, filter by kind, and truncate.
     results.sort_by(|a, b| b.memory_score.total_cmp(&a.memory_score));
+    if let Some(kind_filter) = kind {
+        results.retain(|r| r.observation.kind == kind_filter);
+    }
     results.truncate(limit);
 
     // 7. Persist scores to the database for later retrieval without recomputation.
@@ -175,6 +181,7 @@ fn fts_candidates(conn: &Connection, query: &str) -> Result<Vec<(i64, f64)>> {
             "SELECT rowid, bm25(observations_fts, 5.0, 1.0) AS score \
              FROM observations_fts \
              WHERE observations_fts MATCH ?1 \
+             ORDER BY score \
              LIMIT ?2",
         )
         .context("prepare FTS5 candidate query")?;

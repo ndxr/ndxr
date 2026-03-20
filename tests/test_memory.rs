@@ -123,9 +123,16 @@ fn search_memory_finds_relevant() {
     )
     .unwrap();
 
-    let results =
-        ndxr::memory::search::search_memories(&conn, "JWT authentication", &[], 10, true, 7.0)
-            .unwrap();
+    let results = ndxr::memory::search::search_memories(
+        &conn,
+        "JWT authentication",
+        &[],
+        10,
+        true,
+        7.0,
+        None,
+    )
+    .unwrap();
     assert!(!results.is_empty());
     // The JWT-related observation should score higher.
     assert!(results[0].observation.content.contains("JWT"));
@@ -136,7 +143,8 @@ fn search_memory_empty_query_returns_empty() {
     let (_tmp, config) = helpers::setup_indexed_workspace();
     let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
 
-    let results = ndxr::memory::search::search_memories(&conn, "", &[], 10, true, 7.0).unwrap();
+    let results =
+        ndxr::memory::search::search_memories(&conn, "", &[], 10, true, 7.0, None).unwrap();
     assert!(results.is_empty());
 }
 
@@ -167,15 +175,29 @@ fn search_memory_excludes_stale_when_requested() {
     ndxr::memory::staleness::detect_staleness(&conn, &changed).unwrap();
 
     // Excluding stale should return nothing.
-    let results =
-        ndxr::memory::search::search_memories(&conn, "JWT authentication", &[], 10, false, 7.0)
-            .unwrap();
+    let results = ndxr::memory::search::search_memories(
+        &conn,
+        "JWT authentication",
+        &[],
+        10,
+        false,
+        7.0,
+        None,
+    )
+    .unwrap();
     assert!(results.is_empty());
 
     // Including stale should find it.
-    let results =
-        ndxr::memory::search::search_memories(&conn, "JWT authentication", &[], 10, true, 7.0)
-            .unwrap();
+    let results = ndxr::memory::search::search_memories(
+        &conn,
+        "JWT authentication",
+        &[],
+        10,
+        true,
+        7.0,
+        None,
+    )
+    .unwrap();
     assert!(!results.is_empty());
 }
 
@@ -468,7 +490,7 @@ fn search_memory_with_empty_database() {
 
     // No sessions, no observations -- search should return empty
     let results =
-        ndxr::memory::search::search_memories(&conn, "anything", &[], 10, true, 7.0).unwrap();
+        ndxr::memory::search::search_memories(&conn, "anything", &[], 10, true, 7.0, None).unwrap();
     assert!(results.is_empty());
 }
 

@@ -117,20 +117,26 @@ fn resolve_target_id(
     file_path: &str,
 ) -> Option<i64> {
     // 1. Same file.
-    if let Ok(id) = stmt_same_file.query_row(rusqlite::params![name, file_path], |row| {
+    match stmt_same_file.query_row(rusqlite::params![name, file_path], |row| {
         row.get::<_, i64>(0)
     }) {
-        return Some(id);
+        Ok(id) => return Some(id),
+        Err(rusqlite::Error::QueryReturnedNoRows) => {}
+        Err(e) => tracing::warn!("edge resolution same-file query failed for {name}: {e}"),
     }
 
     // 2. Global exported.
-    if let Ok(id) = stmt_exported.query_row(rusqlite::params![name], |row| row.get::<_, i64>(0)) {
-        return Some(id);
+    match stmt_exported.query_row(rusqlite::params![name], |row| row.get::<_, i64>(0)) {
+        Ok(id) => return Some(id),
+        Err(rusqlite::Error::QueryReturnedNoRows) => {}
+        Err(e) => tracing::warn!("edge resolution exported query failed for {name}: {e}"),
     }
 
     // 3. Global any.
-    if let Ok(id) = stmt_any.query_row(rusqlite::params![name], |row| row.get::<_, i64>(0)) {
-        return Some(id);
+    match stmt_any.query_row(rusqlite::params![name], |row| row.get::<_, i64>(0)) {
+        Ok(id) => return Some(id),
+        Err(rusqlite::Error::QueryReturnedNoRows) => {}
+        Err(e) => tracing::warn!("edge resolution any query failed for {name}: {e}"),
     }
 
     None

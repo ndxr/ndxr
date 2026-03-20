@@ -31,8 +31,8 @@ pub struct ScoreBreakdown {
 /// Normalizes a slice of scores to \[0, 1\] using min-max normalization.
 ///
 /// If all values are equal (or the slice contains a single value), returns
-/// all 1.0. Handles negative values (like BM25 raw scores) correctly by
-/// shifting the minimum to zero.
+/// all 0.0 — no differentiation signal exists. Handles negative values
+/// (like BM25 raw scores) correctly by shifting the minimum to zero.
 #[must_use]
 pub fn normalize_min_max(scores: &[f64]) -> Vec<f64> {
     if scores.is_empty() {
@@ -42,7 +42,7 @@ pub fn normalize_min_max(scores: &[f64]) -> Vec<f64> {
     let max = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let range = max - min;
     if range < f64::EPSILON {
-        return vec![1.0; scores.len()];
+        return vec![0.0; scores.len()];
     }
     scores.iter().map(|&s| (s - min) / range).collect()
 }
@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn normalize_single_value() {
-        assert_eq!(normalize_min_max(&[5.0]), vec![1.0]);
+        assert_eq!(normalize_min_max(&[5.0]), vec![0.0]);
     }
 
     #[test]
@@ -170,7 +170,7 @@ mod tests {
     #[test]
     fn normalize_all_equal() {
         let result = normalize_min_max(&[3.0, 3.0, 3.0]);
-        assert!(result.iter().all(|&v| (v - 1.0).abs() < f64::EPSILON));
+        assert!(result.iter().all(|&v| v.abs() < f64::EPSILON));
     }
 
     #[test]

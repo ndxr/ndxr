@@ -19,17 +19,19 @@ fn build_capsule_with_budget(
     workspace_root: &std::path::Path,
 ) -> ndxr::capsule::Capsule {
     let estimator = ndxr::config::TokenEstimator::default();
-    ndxr::capsule::builder::build_capsule(&ndxr::capsule::builder::CapsuleRequest {
-        conn,
-        graph,
-        search_results: results,
-        query,
-        intent: &ndxr::graph::intent::Intent::Explore,
-        token_budget,
-        estimator: &estimator,
-        workspace_root,
-    })
-    .unwrap()
+    let (capsule, _memory_budget) =
+        ndxr::capsule::builder::build_capsule(&ndxr::capsule::builder::CapsuleRequest {
+            conn,
+            graph,
+            search_results: results,
+            query,
+            intent: &ndxr::graph::intent::Intent::Explore,
+            token_budget,
+            estimator: &estimator,
+            workspace_root,
+        })
+        .unwrap();
+    capsule
 }
 
 // ---------------------------------------------------------------------------
