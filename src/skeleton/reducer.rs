@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 
-use crate::storage::db::BATCH_PARAM_LIMIT;
+use crate::storage::db::{BATCH_PARAM_LIMIT, build_batch_placeholders};
 
 /// A row of symbol data loaded from the database.
 #[derive(Debug, Clone)]
@@ -138,15 +138,14 @@ pub fn load_file_symbols(conn: &Connection, file_paths: &[String]) -> Result<Vec
     let mut result = Vec::new();
 
     for chunk in file_paths.chunks(BATCH_PARAM_LIMIT) {
-        let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
+        let placeholders = build_batch_placeholders(chunk.len());
         let sql = format!(
             "SELECT s.id, s.name, s.kind, s.fqn, s.signature, s.docstring, \
                     s.start_line, s.end_line, s.is_exported, f.path \
              FROM symbols s \
              JOIN files f ON s.file_id = f.id \
-             WHERE f.path IN ({}) \
-             ORDER BY f.path, s.start_line",
-            placeholders.join(", ")
+             WHERE f.path IN ({placeholders}) \
+             ORDER BY f.path, s.start_line"
         );
 
         let mut stmt = conn.prepare(&sql).context("prepare load_file_symbols")?;
@@ -249,11 +248,8 @@ pub fn render_skeletons(
 fn batch_load_line_counts(conn: &Connection, paths: &[String]) -> Result<HashMap<String, i64>> {
     let mut result = HashMap::with_capacity(paths.len());
     for chunk in paths.chunks(BATCH_PARAM_LIMIT) {
-        let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
-        let sql = format!(
-            "SELECT path, line_count FROM files WHERE path IN ({})",
-            placeholders.join(", ")
-        );
+        let placeholders = build_batch_placeholders(chunk.len());
+        let sql = format!("SELECT path, line_count FROM files WHERE path IN ({placeholders})");
         let mut stmt = conn
             .prepare(&sql)
             .context("prepare batch_load_line_counts")?;

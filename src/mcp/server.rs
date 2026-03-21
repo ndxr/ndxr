@@ -27,7 +27,7 @@ use crate::config::{NdxrConfig, TokenEstimator};
 use crate::graph::builder::SymbolGraph;
 use crate::graph::intent;
 use crate::memory::{capture, compression, search as mem_search, store};
-use crate::storage::db::BATCH_PARAM_LIMIT;
+use crate::storage::db::{BATCH_PARAM_LIMIT, build_batch_placeholders};
 use crate::{graph, indexer, skeleton, storage};
 
 /// Default token budget for MCP tool responses.
@@ -1047,12 +1047,11 @@ fn batch_load_impact_metadata(
 ) -> anyhow::Result<HashMap<i64, (String, String, String)>> {
     let mut result = HashMap::with_capacity(ids.len());
     for chunk in ids.chunks(BATCH_PARAM_LIMIT) {
-        let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
+        let placeholders = build_batch_placeholders(chunk.len());
         let sql = format!(
             "SELECT s.id, s.fqn, s.kind, f.path FROM symbols s \
              JOIN files f ON s.file_id = f.id \
-             WHERE s.id IN ({})",
-            placeholders.join(", ")
+             WHERE s.id IN ({placeholders})"
         );
         let mut stmt = conn
             .prepare(&sql)

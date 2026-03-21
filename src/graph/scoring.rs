@@ -4,6 +4,8 @@
 //! function that combines BM25, TF-IDF, and centrality with intent-specific
 //! weights.
 
+use std::borrow::Cow;
+
 use super::intent::IntentWeights;
 
 /// Breakdown of how a search result's score was computed.
@@ -104,21 +106,21 @@ pub fn generate_breakdown(params: BreakdownParams) -> ScoreBreakdown {
         in_degree,
         has_docstring,
     } = params;
-    let mut parts = Vec::new();
+    let mut parts: Vec<Cow<'static, str>> = Vec::new();
     if centrality > 0.7 {
-        parts.push(format!("High centrality (called by {in_degree} symbols)"));
+        parts.push(format!("High centrality (called by {in_degree} symbols)").into());
     }
     if bm25 > 0.7 {
-        parts.push("Strong term match".to_string());
+        parts.push("Strong term match".into());
     }
     if tfidf > 0.7 {
-        parts.push("High TF-IDF similarity".to_string());
+        parts.push("High TF-IDF similarity".into());
     }
     if intent_boost > 0.0 {
-        parts.push(format!("{intent}-boosted"));
+        parts.push(format!("{intent}-boosted").into());
     }
     if has_docstring {
-        parts.push("Has documentation".to_string());
+        parts.push("Has documentation".into());
     }
     let reason = if parts.is_empty() {
         "General relevance".to_string()

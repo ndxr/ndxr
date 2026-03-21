@@ -33,8 +33,6 @@ pub struct SymbolGraph {
 /// Returns an error if any database query fails.
 pub fn build_graph(conn: &Connection) -> Result<SymbolGraph> {
     let mut graph = DiGraph::new();
-    let mut id_to_node: HashMap<i64, NodeIndex> = HashMap::new();
-    let mut node_to_id: HashMap<NodeIndex, i64> = HashMap::new();
 
     // 1. Load all symbol IDs and create nodes.
     let mut stmt = conn
@@ -52,6 +50,9 @@ pub fn build_graph(conn: &Connection) -> Result<SymbolGraph> {
             }
         })
         .collect();
+
+    let mut id_to_node: HashMap<i64, NodeIndex> = HashMap::with_capacity(symbol_ids.len());
+    let mut node_to_id: HashMap<NodeIndex, i64> = HashMap::with_capacity(symbol_ids.len());
 
     for sym_id in symbol_ids {
         let node = graph.add_node(sym_id);

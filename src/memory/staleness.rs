@@ -7,7 +7,7 @@
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 
-use crate::storage::db::BATCH_PARAM_LIMIT;
+use crate::storage::db::{BATCH_PARAM_LIMIT, build_batch_placeholders};
 
 /// A symbol that changed during re-indexing.
 pub struct ChangedSymbol {
@@ -51,12 +51,11 @@ pub fn detect_staleness(conn: &Connection, changed_symbols: &[ChangedSymbol]) ->
 
     let fqns: Vec<&str> = changed_symbols.iter().map(|s| s.fqn.as_str()).collect();
     for chunk in fqns.chunks(BATCH_PARAM_LIMIT) {
-        let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
+        let placeholders = build_batch_placeholders(chunk.len());
         let sql = format!(
             "UPDATE observations SET is_stale = 1 WHERE id IN (\
-                 SELECT observation_id FROM observation_links WHERE symbol_fqn IN ({})\
-             ) AND is_stale = 0",
-            placeholders.join(", ")
+                 SELECT observation_id FROM observation_links WHERE symbol_fqn IN ({placeholders})\
+             ) AND is_stale = 0"
         );
         let params: Vec<&dyn rusqlite::types::ToSql> = chunk
             .iter()

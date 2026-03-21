@@ -114,15 +114,15 @@ pub fn compute_tf(tokens: &[String]) -> HashMap<String, f64> {
         return HashMap::new();
     }
 
-    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut counts: HashMap<&str, usize> = HashMap::with_capacity(tokens.len());
     for t in tokens {
-        *counts.entry(t.clone()).or_default() += 1;
+        *counts.entry(t.as_str()).or_default() += 1;
     }
 
     let total = tokens.len() as f64;
     counts
         .into_iter()
-        .map(|(k, v)| (k, v as f64 / total))
+        .map(|(k, v)| (k.to_string(), v as f64 / total))
         .collect()
 }
 

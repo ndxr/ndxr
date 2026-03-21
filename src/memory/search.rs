@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 
 use crate::indexer::tokenizer::{self, build_fts_query};
-use crate::storage::db::BATCH_PARAM_LIMIT;
+use crate::storage::db::{BATCH_PARAM_LIMIT, build_batch_placeholders};
 use crate::util::unix_now;
 
 use super::store::Observation;
@@ -229,12 +229,11 @@ fn bm25_range(candidates: &[(i64, f64)]) -> (f64, f64) {
 fn batch_load_observations(conn: &Connection, ids: &[i64]) -> Result<HashMap<i64, Observation>> {
     let mut result = HashMap::with_capacity(ids.len());
     for chunk in ids.chunks(BATCH_PARAM_LIMIT) {
-        let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
+        let placeholders = build_batch_placeholders(chunk.len());
         let sql = format!(
             "SELECT id, session_id, kind, content, headline, detail_level, is_stale, \
              created_at, score \
-             FROM observations WHERE id IN ({})",
-            placeholders.join(", ")
+             FROM observations WHERE id IN ({placeholders})"
         );
         let mut stmt = conn
             .prepare(&sql)
@@ -275,11 +274,10 @@ fn batch_load_observation_links(
 ) -> Result<HashMap<i64, Vec<String>>> {
     let mut result: HashMap<i64, Vec<String>> = HashMap::with_capacity(ids.len());
     for chunk in ids.chunks(BATCH_PARAM_LIMIT) {
-        let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
+        let placeholders = build_batch_placeholders(chunk.len());
         let sql = format!(
             "SELECT observation_id, symbol_fqn FROM observation_links \
-             WHERE observation_id IN ({})",
-            placeholders.join(", ")
+             WHERE observation_id IN ({placeholders})"
         );
         let mut stmt = conn
             .prepare(&sql)

@@ -29,7 +29,7 @@ use crate::config::NdxrConfig;
 use crate::graph;
 use crate::memory;
 use crate::storage;
-use crate::storage::db::BATCH_PARAM_LIMIT;
+use crate::storage::db::{BATCH_PARAM_LIMIT, build_batch_placeholders};
 
 /// Statistics returned after an indexing operation.
 #[derive(Debug, Default)]
@@ -512,11 +512,9 @@ fn snapshot_symbol_hashes(
 
     // Batch-query FQNs in chunks to stay under SQLite's variable limit.
     for chunk in fqns.chunks(BATCH_PARAM_LIMIT) {
-        let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
-        let sql = format!(
-            "SELECT fqn, signature, body_hash FROM symbols WHERE fqn IN ({})",
-            placeholders.join(", ")
-        );
+        let placeholders = build_batch_placeholders(chunk.len());
+        let sql =
+            format!("SELECT fqn, signature, body_hash FROM symbols WHERE fqn IN ({placeholders})");
 
         let mut stmt = conn.prepare(&sql).context("prepare snapshot batch query")?;
         let params: Vec<&dyn rusqlite::types::ToSql> = chunk
@@ -545,11 +543,10 @@ fn snapshot_symbol_hashes(
         .map(|p| crate::util::normalize_path(p))
         .collect();
     for chunk in deleted_paths.chunks(BATCH_PARAM_LIMIT) {
-        let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
+        let placeholders = build_batch_placeholders(chunk.len());
         let sql = format!(
             "SELECT s.fqn, s.signature, s.body_hash FROM symbols s \
-             JOIN files f ON s.file_id = f.id WHERE f.path IN ({})",
-            placeholders.join(", ")
+             JOIN files f ON s.file_id = f.id WHERE f.path IN ({placeholders})"
         );
         let mut stmt = conn
             .prepare(&sql)
@@ -597,11 +594,9 @@ fn detect_changed_symbols(
     let mut post_state: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
 
     for chunk in fqns.chunks(BATCH_PARAM_LIMIT) {
-        let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
-        let sql = format!(
-            "SELECT fqn, signature, body_hash FROM symbols WHERE fqn IN ({})",
-            placeholders.join(", ")
-        );
+        let placeholders = build_batch_placeholders(chunk.len());
+        let sql =
+            format!("SELECT fqn, signature, body_hash FROM symbols WHERE fqn IN ({placeholders})");
 
         let params: Vec<&dyn rusqlite::types::ToSql> = chunk
             .iter()

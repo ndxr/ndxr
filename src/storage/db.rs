@@ -16,6 +16,15 @@ use crate::util::unix_now;
 /// Set to 900 to stay safely below `SQLite`'s default `SQLITE_LIMIT_VARIABLE_NUMBER` (999).
 pub(crate) const BATCH_PARAM_LIMIT: usize = 900;
 
+/// Builds a comma-separated SQL placeholder string `?1, ?2, ..., ?N`.
+///
+/// Used with `WHERE id IN (...)` batch queries chunked by [`BATCH_PARAM_LIMIT`].
+#[must_use]
+pub(crate) fn build_batch_placeholders(count: usize) -> String {
+    let parts: Vec<String> = (1..=count).map(|i| format!("?{i}")).collect();
+    parts.join(", ")
+}
+
 /// Opens an existing ndxr database or creates a new one at `path`.
 ///
 /// Parent directories are created if they do not exist. Connection pragmas
@@ -321,4 +330,24 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_batch_placeholders_typical() {
+        assert_eq!(build_batch_placeholders(3), "?1, ?2, ?3");
+    }
+
+    #[test]
+    fn build_batch_placeholders_single() {
+        assert_eq!(build_batch_placeholders(1), "?1");
+    }
+
+    #[test]
+    fn build_batch_placeholders_empty() {
+        assert_eq!(build_batch_placeholders(0), "");
+    }
 }

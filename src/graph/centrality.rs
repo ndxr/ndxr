@@ -150,7 +150,7 @@ mod tests {
         let centralities: Vec<f64> = stmt
             .query_map([], |row| row.get::<_, f64>(0))
             .unwrap()
-            .filter_map(Result::ok)
+            .map(|r| r.unwrap())
             .collect();
 
         assert_eq!(centralities.len(), 3);

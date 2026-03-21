@@ -19,7 +19,7 @@ use crate::graph::builder::SymbolGraph;
 use crate::graph::intent::{Intent, get_capsule_hints};
 use crate::graph::search::SearchResult;
 use crate::skeleton::reducer;
-use crate::storage::db::BATCH_PARAM_LIMIT;
+use crate::storage::db::{BATCH_PARAM_LIMIT, build_batch_placeholders};
 
 /// Maximum memory token budget (hard cap).
 const MAX_MEMORY_TOKENS: f64 = 500.0;
@@ -305,12 +305,11 @@ fn batch_load_symbol_file_names(
 ) -> Result<HashMap<i64, (String, String)>> {
     let mut result = HashMap::with_capacity(ids.len());
     for chunk in ids.chunks(BATCH_PARAM_LIMIT) {
-        let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
+        let placeholders = build_batch_placeholders(chunk.len());
         let sql = format!(
             "SELECT s.id, f.path, s.name FROM symbols s \
              JOIN files f ON s.file_id = f.id \
-             WHERE s.id IN ({})",
-            placeholders.join(", ")
+             WHERE s.id IN ({placeholders})"
         );
         let mut stmt = conn
             .prepare(&sql)

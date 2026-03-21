@@ -18,6 +18,7 @@ use super::builder::SymbolGraph;
 use super::intent::{self, Intent};
 use super::scoring::{self, ScoreBreakdown};
 use crate::indexer::tokenizer;
+use crate::storage::db::{BATCH_PARAM_LIMIT, build_batch_placeholders};
 
 /// Maximum number of FTS5 candidates to evaluate before ranking.
 const FTS_CANDIDATE_LIMIT: usize = 100;
@@ -302,15 +303,14 @@ struct SymbolMeta {
 /// instead of one query per candidate.
 fn batch_load_symbol_metadata(conn: &Connection, sym_ids: &[i64]) -> HashMap<i64, SymbolMeta> {
     let mut result = HashMap::with_capacity(sym_ids.len());
-    for chunk in sym_ids.chunks(crate::storage::db::BATCH_PARAM_LIMIT) {
-        let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
+    for chunk in sym_ids.chunks(BATCH_PARAM_LIMIT) {
+        let placeholders = build_batch_placeholders(chunk.len());
         let sql = format!(
             "SELECT s.id, s.name, s.kind, s.fqn, f.path, s.start_line, s.end_line, \
                     s.signature, s.is_exported, s.docstring, s.centrality \
              FROM symbols s \
              JOIN files f ON s.file_id = f.id \
-             WHERE s.id IN ({})",
-            placeholders.join(", ")
+             WHERE s.id IN ({placeholders})"
         );
         let params: Vec<&dyn rusqlite::types::ToSql> = chunk
             .iter()
@@ -398,12 +398,9 @@ fn preload_idf(
     // Using 0.0 ensures they don't inflate TF-IDF scores.
     let fallback_idf = 0.0;
 
-    for chunk in terms.chunks(crate::storage::db::BATCH_PARAM_LIMIT) {
-        let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
-        let sql = format!(
-            "SELECT term, df FROM doc_frequencies WHERE term IN ({})",
-            placeholders.join(", ")
-        );
+    for chunk in terms.chunks(BATCH_PARAM_LIMIT) {
+        let placeholders = build_batch_placeholders(chunk.len());
+        let sql = format!("SELECT term, df FROM doc_frequencies WHERE term IN ({placeholders})");
         let params: Vec<&dyn rusqlite::types::ToSql> = chunk
             .iter()
             .map(|t| *t as &dyn rusqlite::types::ToSql)
@@ -452,11 +449,10 @@ fn batch_load_term_frequencies(
     sym_ids: &[i64],
 ) -> HashMap<i64, HashMap<String, f64>> {
     let mut result: HashMap<i64, HashMap<String, f64>> = HashMap::with_capacity(sym_ids.len());
-    for chunk in sym_ids.chunks(crate::storage::db::BATCH_PARAM_LIMIT) {
-        let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
+    for chunk in sym_ids.chunks(BATCH_PARAM_LIMIT) {
+        let placeholders = build_batch_placeholders(chunk.len());
         let sql = format!(
-            "SELECT symbol_id, term, tf FROM term_frequencies WHERE symbol_id IN ({})",
-            placeholders.join(", ")
+            "SELECT symbol_id, term, tf FROM term_frequencies WHERE symbol_id IN ({placeholders})"
         );
         let params: Vec<&dyn rusqlite::types::ToSql> = chunk
             .iter()

@@ -448,7 +448,7 @@ fn unwrap_definition_node(node: Node<'_>) -> &str {
 
 /// Walks up the AST to find the parent scope for FQN construction.
 fn find_parent_scope(node: Node<'_>, source: &[u8], file_path: &str) -> String {
-    let mut scope_parts: Vec<String> = Vec::new();
+    let mut scope_parts: Vec<String> = Vec::with_capacity(4);
     let mut current = node.parent();
 
     while let Some(parent) = current {
