@@ -51,6 +51,7 @@ impl ToolCallRecord {
             ),
             "get_skeleton" => format!("Skeleton: {}", self.result_summary),
             "get_impact_graph" => format!("Impact: {}", self.result_summary),
+            "search_logic_flow" => format!("Logic flow: {}", self.result_summary),
             "get_session_context" => format!("Session context: {}", self.result_summary),
             _ => format!("{}: {}", self.tool_name, self.result_summary),
         }
@@ -162,5 +163,18 @@ mod tests {
             result_summary: String::new(),
         };
         assert!(record.should_capture());
+    }
+
+    #[test]
+    fn search_logic_flow_captures_and_headlines() {
+        let record = ToolCallRecord {
+            tool_name: "search_logic_flow".to_owned(),
+            intent: None,
+            query: Some("auth -> validate".to_owned()),
+            pivot_fqns: vec![],
+            result_summary: "2 paths found".to_owned(),
+        };
+        assert!(record.should_capture());
+        assert_eq!(record.to_headline(), "Logic flow: 2 paths found");
     }
 }

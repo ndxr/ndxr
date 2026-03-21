@@ -134,6 +134,8 @@ pub fn build_capsule(req: &CapsuleRequest<'_>) -> Result<(Capsule, usize)> {
             skeletons,
             memories: Vec::new(),
             impact_hints: Vec::new(),
+            recent_changes: Vec::new(),
+            warnings: Vec::new(),
             stats,
         },
         memory_budget,

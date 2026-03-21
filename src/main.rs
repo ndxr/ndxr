@@ -498,6 +498,7 @@ Example: `mcp__ndxr__run_pipeline({ task: \"fix the auth crash\", intent: \"debu
 - `mcp__ndxr__get_impact_graph` -- check blast radius before refactoring
 - `mcp__ndxr__search_memory` -- search past session insights
 - `mcp__ndxr__save_observation` -- save important decisions or insights
+- `mcp__ndxr__search_logic_flow` -- trace execution paths between symbols
 - `mcp__ndxr__get_session_context` -- review session history
 - `mcp__ndxr__index_status` -- check if index is ready";
 

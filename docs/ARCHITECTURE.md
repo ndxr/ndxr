@@ -127,6 +127,10 @@ tool call → auto-capture observation → link to pivot FQNs
 
 **Staleness detection** runs after each index. When a symbol's signature or body changes, all observations linked to that symbol's FQN are marked stale. This prevents the agent from acting on outdated context.
 
+**AST structural diffs** — beyond staleness, the indexer now detects six types of structural changes (added, removed, signature changed, visibility changed, renamed, body changed) and stores them in the `symbol_changes` table. Recent changes are surfaced in capsule responses so agents see what shifted since the session started.
+
+**Anti-pattern detection** — three built-in detectors analyze agent behavior history: dead-end exploration (symbol added then removed), file thrashing (4+ changes to one file in 5 minutes), and circular search (3+ similar queries without learning). Warnings are surfaced in capsules and persisted as observations. The framework is extensible via the `PatternRule` trait.
+
 ## MCP Server Design
 
 ### Shared State
@@ -139,14 +143,14 @@ tool call → auto-capture observation → link to pivot FQNs
 
 ### Tool Architecture
 
-Eight tools, split into two categories:
+Nine tools, split into two categories:
 
-- **Auto-capture tools** (5) — record what the agent does. `run_pipeline` and `get_context_capsule` share a common pipeline via `run_capsule_pipeline()`. Auto-capture boilerplate is consolidated in `commit_tool_record()`.
+- **Auto-capture tools** (6) — record what the agent does. `run_pipeline` and `get_context_capsule` share a common pipeline via `run_capsule_pipeline()`. `search_logic_flow` traces execution paths between symbols using Yen's K-shortest paths on the dependency graph. Auto-capture boilerplate is consolidated in `commit_tool_record()`.
 - **Manual tools** (3) — `search_memory`, `save_observation`, `index_status`. No auto-capture, used for explicit agent actions.
 
 ### File Watcher
 
-The watcher uses `notify` for filesystem events, debounced via a tokio interval + pending `HashSet`. On each tick, pending paths are drained, `index_paths()` re-indexes only the changed files, and the graph is rebuilt on a separate connection. The new graph is stored via `graph.write().await` — never silently dropped.
+The watcher uses `notify` for filesystem events, debounced via a tokio interval + pending `HashSet`. On each tick, pending paths are drained, `index_paths()` re-indexes only the changed files, and the graph is rebuilt on a separate connection. The new graph is stored via `graph.write().await` — never silently dropped. After successful re-indexing, anti-pattern detectors run against the session's change history to surface warnings early.
 
 ## Security Model
 

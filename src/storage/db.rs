@@ -271,13 +271,38 @@ CREATE INDEX IF NOT EXISTS idx_observations_stale ON observations(is_stale);
 CREATE INDEX IF NOT EXISTS idx_obs_links_fqn ON observation_links(symbol_fqn);
 ";
 
+/// Symbol changes table for AST structural diff tracking.
+const CREATE_SYMBOL_CHANGES: &str = "
+CREATE TABLE IF NOT EXISTS symbol_changes (
+    id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol_fqn                TEXT    NOT NULL,
+    file_path                 TEXT    NOT NULL,
+    change_kind               TEXT    NOT NULL,
+    old_value                 TEXT,
+    new_value                 TEXT,
+    session_id                TEXT,
+    correlated_observation_id INTEGER,
+    detected_at               INTEGER NOT NULL,
+    FOREIGN KEY (correlated_observation_id) REFERENCES observations(id) ON DELETE SET NULL
+);
+";
+
+/// Indexes on the `symbol_changes` table.
+const CREATE_SYMBOL_CHANGES_INDEXES: &str = "
+CREATE INDEX IF NOT EXISTS idx_changes_fqn_detected ON symbol_changes(symbol_fqn, detected_at);
+CREATE INDEX IF NOT EXISTS idx_changes_detected ON symbol_changes(detected_at DESC);
+CREATE INDEX IF NOT EXISTS idx_changes_file ON symbol_changes(file_path);
+CREATE INDEX IF NOT EXISTS idx_changes_kind ON symbol_changes(change_kind);
+CREATE INDEX IF NOT EXISTS idx_changes_session ON symbol_changes(session_id);
+";
+
 // ---------------------------------------------------------------------------
 // Migrations
 // ---------------------------------------------------------------------------
 
 /// Each migration function receives a transaction and applies one schema step.
 /// Migrations are cumulative and never removed.
-const MIGRATIONS: &[fn(&rusqlite::Transaction<'_>) -> Result<()>] = &[migrate_v1];
+const MIGRATIONS: &[fn(&rusqlite::Transaction<'_>) -> Result<()>] = &[migrate_v1, migrate_v2];
 
 /// V1: create the full initial schema.
 fn migrate_v1(tx: &rusqlite::Transaction<'_>) -> Result<()> {
@@ -296,6 +321,15 @@ fn migrate_v1(tx: &rusqlite::Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
+/// V2: add `symbol_changes` table for AST structural diff tracking.
+fn migrate_v2(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    tx.execute_batch(CREATE_SYMBOL_CHANGES)
+        .context("v2: create symbol_changes table")?;
+    tx.execute_batch(CREATE_SYMBOL_CHANGES_INDEXES)
+        .context("v2: create symbol_changes indexes")?;
+    Ok(())
+}
+
 /// Runs all pending migrations inside individual transactions.
 fn run_migrations(conn: &Connection) -> Result<()> {
     // Ensure the schema_version table exists before querying it.
@@ -311,7 +345,8 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         .context("read current schema version")?;
 
     for (i, migration) in MIGRATIONS.iter().enumerate() {
-        let version = i64::try_from(i + 1).expect("migration index exceeds i64 range");
+        #[allow(clippy::cast_possible_wrap)] // MIGRATIONS array has ≤10 entries
+        let version = (i + 1) as i64;
         if version <= current_version {
             continue;
         }
@@ -334,6 +369,8 @@ fn run_migrations(conn: &Connection) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use tempfile::TempDir;
+
     use super::*;
 
     #[test]
@@ -349,5 +386,79 @@ mod tests {
     #[test]
     fn build_batch_placeholders_empty() {
         assert_eq!(build_batch_placeholders(0), "");
+    }
+
+    #[test]
+    fn v2_migration_creates_symbol_changes_table() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("test.db");
+        let conn = open_or_create(&db_path).unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='symbol_changes'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "symbol_changes table should exist after migration"
+        );
+
+        conn.execute(
+            "INSERT INTO symbol_changes (symbol_fqn, file_path, change_kind, old_value, new_value, session_id, detected_at)
+             VALUES ('test::foo', 'src/test.rs', 'added', NULL, 'pub fn foo()', NULL, 1000)",
+            [],
+        )
+        .unwrap();
+
+        let idx_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name LIKE 'idx_changes_%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            idx_count, 5,
+            "expected 5 indexes on symbol_changes, got {idx_count}"
+        );
+    }
+
+    #[test]
+    fn v2_migration_is_idempotent() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("test.db");
+        let conn1 = open_or_create(&db_path).unwrap();
+        drop(conn1);
+        let conn2 = open_or_create(&db_path).unwrap();
+        let version: i64 = conn2
+            .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, 2);
+    }
+
+    #[test]
+    fn reset_code_tables_preserves_symbol_changes() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("test.db");
+        let conn = open_or_create(&db_path).unwrap();
+
+        conn.execute(
+            "INSERT INTO symbol_changes (symbol_fqn, file_path, change_kind, detected_at)
+             VALUES ('test::foo', 'src/test.rs', 'added', 1000)",
+            [],
+        )
+        .unwrap();
+
+        reset_code_tables(&conn).unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM symbol_changes", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "symbol_changes should survive reset_code_tables");
     }
 }

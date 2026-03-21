@@ -112,6 +112,32 @@ pub struct ImpactHint {
     pub blast_radius: BlastRadius,
 }
 
+/// A recent symbol change surfaced in the capsule.
+#[derive(Debug, Clone, Serialize)]
+pub struct RecentChange {
+    /// Fully-qualified symbol name.
+    pub fqn: String,
+    /// Type of change (e.g., `signature_changed`, `added`).
+    pub change: String,
+    /// Previous value (nullable).
+    pub old: Option<String>,
+    /// New value (nullable).
+    pub new: Option<String>,
+    /// Relative time description (e.g., "2m ago").
+    pub when: String,
+}
+
+/// An anti-pattern warning surfaced in the capsule.
+#[derive(Debug, Clone, Serialize)]
+pub struct Warning {
+    /// Rule that detected this warning.
+    pub rule: String,
+    /// Human-readable summary.
+    pub summary: String,
+    /// Severity level.
+    pub severity: String,
+}
+
 /// Statistics about the capsule construction.
 #[derive(Debug, Clone, Serialize)]
 pub struct CapsuleStats {
@@ -160,6 +186,10 @@ pub struct Capsule {
     pub memories: Vec<MemoryEntry>,
     /// Impact hints for pivot symbols.
     pub impact_hints: Vec<ImpactHint>,
+    /// Recent symbol changes relevant to the query.
+    pub recent_changes: Vec<RecentChange>,
+    /// Anti-pattern warnings detected during this pipeline run.
+    pub warnings: Vec<Warning>,
     /// Construction statistics.
     pub stats: CapsuleStats,
 }

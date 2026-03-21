@@ -168,9 +168,12 @@ fn search_memory_excludes_stale_when_requested() {
     .unwrap();
 
     // Mark stale.
-    let changed = vec![ndxr::memory::staleness::ChangedSymbol {
+    let changed = vec![ndxr::memory::changes::SymbolDiff {
         fqn: "src/auth.ts::validateToken".to_owned(),
-        change_type: ndxr::memory::staleness::SymbolChange::BodyChanged,
+        file_path: String::new(),
+        kind: ndxr::memory::changes::ChangeKind::BodyChanged,
+        old_value: None,
+        new_value: None,
     }];
     ndxr::memory::staleness::detect_staleness(&conn, &changed).unwrap();
 
@@ -224,9 +227,12 @@ fn staleness_marks_linked_observations() {
     )
     .unwrap();
 
-    let changed = vec![ndxr::memory::staleness::ChangedSymbol {
+    let changed = vec![ndxr::memory::changes::SymbolDiff {
         fqn: "src/auth.ts::validateToken".to_owned(),
-        change_type: ndxr::memory::staleness::SymbolChange::BodyChanged,
+        file_path: String::new(),
+        kind: ndxr::memory::changes::ChangeKind::BodyChanged,
+        old_value: None,
+        new_value: None,
     }];
     let marked = ndxr::memory::staleness::detect_staleness(&conn, &changed).unwrap();
     assert_eq!(marked, 1);
@@ -261,9 +267,12 @@ fn staleness_does_not_double_mark() {
     )
     .unwrap();
 
-    let changed = vec![ndxr::memory::staleness::ChangedSymbol {
+    let changed = vec![ndxr::memory::changes::SymbolDiff {
         fqn: "src/auth.ts::validateToken".to_owned(),
-        change_type: ndxr::memory::staleness::SymbolChange::SignatureChanged,
+        file_path: String::new(),
+        kind: ndxr::memory::changes::ChangeKind::SignatureChanged,
+        old_value: None,
+        new_value: None,
     }];
 
     let marked_first = ndxr::memory::staleness::detect_staleness(&conn, &changed).unwrap();
@@ -517,9 +526,12 @@ fn staleness_with_unlinked_observation() {
     .unwrap();
 
     // Run staleness detection -- should NOT mark the unlinked observation
-    let changed = vec![ndxr::memory::staleness::ChangedSymbol {
+    let changed = vec![ndxr::memory::changes::SymbolDiff {
         fqn: "any::symbol".into(),
-        change_type: ndxr::memory::staleness::SymbolChange::BodyChanged,
+        file_path: String::new(),
+        kind: ndxr::memory::changes::ChangeKind::BodyChanged,
+        old_value: None,
+        new_value: None,
     }];
     let marked = ndxr::memory::staleness::detect_staleness(&conn, &changed).unwrap();
     assert_eq!(marked, 0, "unlinked observation should not be marked stale");

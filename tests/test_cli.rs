@@ -115,6 +115,10 @@ fn ndxr_setup_creates_mcp_json() {
     // CLAUDE.md should also be created.
     let claude_md = fs::read_to_string(tmp.path().join("CLAUDE.md")).unwrap();
     assert!(claude_md.contains("ndxr context engine"));
+    assert!(
+        claude_md.contains("search_logic_flow"),
+        "CLAUDE.md should mention search_logic_flow tool"
+    );
 }
 
 #[test]

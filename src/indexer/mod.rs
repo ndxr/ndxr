@@ -29,7 +29,6 @@ use crate::config::NdxrConfig;
 use crate::graph;
 use crate::memory;
 use crate::storage;
-use crate::storage::db::{BATCH_PARAM_LIMIT, build_batch_placeholders};
 
 /// Statistics returned after an indexing operation.
 #[derive(Debug, Default)]
@@ -139,7 +138,16 @@ pub fn index(config: &NdxrConfig) -> Result<IndexStats> {
 
     // 5b. Snapshot existing symbol signatures/body hashes before the write
     //     transaction so we can detect what changed.
-    let pre_index_symbols = snapshot_symbol_hashes(&conn, &results, &deleted)?;
+    let fqn_set: std::collections::HashSet<&str> = results
+        .iter()
+        .flat_map(|r| r.symbols.iter().map(|s| s.fqn.as_str()))
+        .collect();
+    let fqns: Vec<&str> = fqn_set.into_iter().collect();
+    let deleted_paths: Vec<String> = deleted
+        .iter()
+        .map(|p| crate::util::normalize_path(p))
+        .collect();
+    let pre_index_symbols = memory::changes::snapshot_symbol_state(&conn, &fqns, &deleted_paths)?;
 
     // 6. Write to DB in a single transaction.
     write_index_results(&conn, &results, &deleted, &diff, &mut stats)?;
@@ -155,14 +163,20 @@ pub fn index(config: &NdxrConfig) -> Result<IndexStats> {
     );
 
     // 8. Detect observation staleness for changed symbols.
-    let changed_symbols = detect_changed_symbols(&conn, &pre_index_symbols);
-    if !changed_symbols.is_empty() {
-        let marked = memory::staleness::detect_staleness(&conn, &changed_symbols)?;
+    let reindexed_paths: Vec<String> = results
+        .iter()
+        .map(|r| crate::util::normalize_path(&r.path))
+        .collect();
+    let symbol_diffs =
+        memory::changes::detect_symbol_diffs(&conn, &pre_index_symbols, &reindexed_paths)?;
+    if !symbol_diffs.is_empty() {
+        memory::changes::store_symbol_changes(&conn, &symbol_diffs, None)?;
+        let marked = memory::staleness::detect_staleness(&conn, &symbol_diffs)?;
         stats.observations_marked_stale = marked;
         if marked > 0 {
             info!(
                 marked,
-                changed = changed_symbols.len(),
+                changed = symbol_diffs.len(),
                 "observations marked stale"
             );
         }
@@ -264,7 +278,16 @@ pub fn index_paths(config: &NdxrConfig, changed_paths: &[PathBuf]) -> Result<Ind
     let results = parser::parse_files_parallel_from_content(&config.workspace_root, to_parse);
     stats.files_indexed = results.len();
 
-    let pre_index_symbols = snapshot_symbol_hashes(&conn, &results, &all_deleted)?;
+    let fqn_set: std::collections::HashSet<&str> = results
+        .iter()
+        .flat_map(|r| r.symbols.iter().map(|s| s.fqn.as_str()))
+        .collect();
+    let fqns: Vec<&str> = fqn_set.into_iter().collect();
+    let deleted_norm: Vec<String> = all_deleted
+        .iter()
+        .map(|p| crate::util::normalize_path(p))
+        .collect();
+    let pre_index_symbols = memory::changes::snapshot_symbol_state(&conn, &fqns, &deleted_norm)?;
 
     write_index_results(&conn, &results, &all_deleted, &diff, &mut stats)?;
 
@@ -275,9 +298,15 @@ pub fn index_paths(config: &NdxrConfig, changed_paths: &[PathBuf]) -> Result<Ind
     // discarded.
 
     // Staleness detection.
-    let changed_symbols = detect_changed_symbols(&conn, &pre_index_symbols);
-    if !changed_symbols.is_empty() {
-        let marked = memory::staleness::detect_staleness(&conn, &changed_symbols)?;
+    let reindexed_paths: Vec<String> = results
+        .iter()
+        .map(|r| crate::util::normalize_path(&r.path))
+        .collect();
+    let symbol_diffs =
+        memory::changes::detect_symbol_diffs(&conn, &pre_index_symbols, &reindexed_paths)?;
+    if !symbol_diffs.is_empty() {
+        memory::changes::store_symbol_changes(&conn, &symbol_diffs, None)?;
+        let marked = memory::staleness::detect_staleness(&conn, &symbol_diffs)?;
         stats.observations_marked_stale = marked;
     }
 
@@ -483,182 +512,4 @@ fn compute_tfidf(
     .context("recompute doc_frequencies")?;
 
     Ok(())
-}
-
-/// Pre-index snapshot of symbol signatures and body hashes keyed by FQN.
-///
-/// Used after the write transaction to determine which symbols had their
-/// signature or body changed, enabling observation staleness detection.
-type SymbolSnapshot = HashMap<String, (Option<String>, Option<String>)>;
-
-/// Captures the current signature and body hash for all FQNs that will be
-/// affected by the upcoming write transaction.
-///
-/// Includes symbols from files being re-indexed (changed) and symbols from
-/// deleted files.
-fn snapshot_symbol_hashes(
-    conn: &rusqlite::Connection,
-    results: &[parser::ParseResult],
-    deleted: &[PathBuf],
-) -> Result<SymbolSnapshot> {
-    let mut snapshot = SymbolSnapshot::new();
-
-    // Collect unique FQNs from parse results (changed/new files).
-    let fqn_set: HashSet<&str> = results
-        .iter()
-        .flat_map(|r| r.symbols.iter().map(|s| s.fqn.as_str()))
-        .collect();
-    let fqns: Vec<&str> = fqn_set.into_iter().collect();
-
-    // Batch-query FQNs in chunks to stay under SQLite's variable limit.
-    for chunk in fqns.chunks(BATCH_PARAM_LIMIT) {
-        let placeholders = build_batch_placeholders(chunk.len());
-        let sql =
-            format!("SELECT fqn, signature, body_hash FROM symbols WHERE fqn IN ({placeholders})");
-
-        let mut stmt = conn.prepare(&sql).context("prepare snapshot batch query")?;
-        let params: Vec<&dyn rusqlite::types::ToSql> = chunk
-            .iter()
-            .map(|f| f as &dyn rusqlite::types::ToSql)
-            .collect();
-        let rows = stmt
-            .query_map(params.as_slice(), |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                ))
-            })
-            .context("query snapshot batch")?;
-
-        for row in rows {
-            let (fqn, sig, body) = row.context("read snapshot batch row")?;
-            snapshot.insert(fqn, (sig, body));
-        }
-    }
-
-    // Batch-query FQNs from deleted files in chunks.
-    let deleted_paths: Vec<String> = deleted
-        .iter()
-        .map(|p| crate::util::normalize_path(p))
-        .collect();
-    for chunk in deleted_paths.chunks(BATCH_PARAM_LIMIT) {
-        let placeholders = build_batch_placeholders(chunk.len());
-        let sql = format!(
-            "SELECT s.fqn, s.signature, s.body_hash FROM symbols s \
-             JOIN files f ON s.file_id = f.id WHERE f.path IN ({placeholders})"
-        );
-        let mut stmt = conn
-            .prepare(&sql)
-            .context("prepare snapshot batch query for deleted files")?;
-        let params: Vec<&dyn rusqlite::types::ToSql> = chunk
-            .iter()
-            .map(|p| p as &dyn rusqlite::types::ToSql)
-            .collect();
-        let rows = stmt
-            .query_map(params.as_slice(), |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                ))
-            })
-            .context("query snapshot batch for deleted files")?;
-        for row in rows {
-            let (fqn, sig, body) = row.context("read snapshot row for deleted file")?;
-            snapshot.insert(fqn, (sig, body));
-        }
-    }
-
-    Ok(snapshot)
-}
-
-/// Compares pre-index snapshots with post-index state to find changed symbols.
-///
-/// Detects three types of changes:
-/// - Deleted symbols (present in snapshot but no longer in DB)
-/// - Signature changes (signature differs between old and new)
-/// - Body changes (body hash differs between old and new)
-fn detect_changed_symbols(
-    conn: &rusqlite::Connection,
-    pre_snapshot: &SymbolSnapshot,
-) -> Vec<memory::staleness::ChangedSymbol> {
-    let mut changed = Vec::new();
-
-    if pre_snapshot.is_empty() {
-        return changed;
-    }
-
-    // Batch-query all FQNs from the pre-snapshot to get post-index state.
-    let fqns: Vec<&str> = pre_snapshot.keys().map(String::as_str).collect();
-    let mut post_state: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
-
-    for chunk in fqns.chunks(BATCH_PARAM_LIMIT) {
-        let placeholders = build_batch_placeholders(chunk.len());
-        let sql =
-            format!("SELECT fqn, signature, body_hash FROM symbols WHERE fqn IN ({placeholders})");
-
-        let params: Vec<&dyn rusqlite::types::ToSql> = chunk
-            .iter()
-            .map(|f| f as &dyn rusqlite::types::ToSql)
-            .collect();
-
-        let Ok(mut stmt) = conn.prepare(&sql) else {
-            tracing::warn!("failed to prepare staleness batch query");
-            return changed;
-        };
-
-        let rows = match stmt.query_map(params.as_slice(), |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-            ))
-        }) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("staleness batch query failed: {e}");
-                return changed;
-            }
-        };
-
-        for row in rows {
-            match row {
-                Ok((fqn, sig, body)) => {
-                    post_state.insert(fqn, (sig, body));
-                }
-                Err(e) => {
-                    tracing::warn!("staleness batch row read failed: {e}");
-                }
-            }
-        }
-    }
-
-    // Diff pre-snapshot against post-index state.
-    for (fqn, (old_sig, old_body)) in pre_snapshot {
-        match post_state.get(fqn) {
-            None => {
-                // Symbol was deleted.
-                changed.push(memory::staleness::ChangedSymbol {
-                    fqn: fqn.clone(),
-                    change_type: memory::staleness::SymbolChange::Deleted,
-                });
-            }
-            Some((new_sig, new_body)) => {
-                if *old_sig != *new_sig {
-                    changed.push(memory::staleness::ChangedSymbol {
-                        fqn: fqn.clone(),
-                        change_type: memory::staleness::SymbolChange::SignatureChanged,
-                    });
-                } else if *old_body != *new_body {
-                    changed.push(memory::staleness::ChangedSymbol {
-                        fqn: fqn.clone(),
-                        change_type: memory::staleness::SymbolChange::BodyChanged,
-                    });
-                }
-            }
-        }
-    }
-
-    changed
 }

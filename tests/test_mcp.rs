@@ -18,7 +18,7 @@ use ndxr::graph::centrality;
 use ndxr::graph::intent::Intent;
 use ndxr::indexer;
 use ndxr::mcp::server::{CoreEngine, NdxrServer};
-use ndxr::memory::{search as mem_search, staleness, store};
+use ndxr::memory::{changes, search as mem_search, staleness, store};
 use ndxr::skeleton::reducer;
 use ndxr::storage::db;
 
@@ -383,9 +383,12 @@ fn staleness_detection_marks_observations() {
     let obs_id = store::save_observation(&conn, &obs).unwrap();
 
     // Simulate that the linked symbol changed.
-    let changed = vec![staleness::ChangedSymbol {
+    let changed = vec![changes::SymbolDiff {
         fqn: "src/auth.ts::validateToken".to_owned(),
-        change_type: staleness::SymbolChange::SignatureChanged,
+        file_path: String::new(),
+        kind: changes::ChangeKind::SignatureChanged,
+        old_value: None,
+        new_value: None,
     }];
 
     let marked = staleness::detect_staleness(&conn, &changed).unwrap();

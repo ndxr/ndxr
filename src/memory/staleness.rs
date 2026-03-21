@@ -7,25 +7,8 @@
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 
+use crate::memory::changes::SymbolDiff;
 use crate::storage::db::{BATCH_PARAM_LIMIT, build_batch_placeholders};
-
-/// A symbol that changed during re-indexing.
-pub struct ChangedSymbol {
-    /// Fully-qualified name of the changed symbol.
-    pub fqn: String,
-    /// Type of change detected.
-    pub change_type: SymbolChange,
-}
-
-/// Type of change detected for a symbol.
-pub enum SymbolChange {
-    /// The symbol was removed from the codebase.
-    Deleted,
-    /// The symbol's type signature changed.
-    SignatureChanged,
-    /// The symbol's implementation body changed.
-    BodyChanged,
-}
 
 /// Detects and marks stale observations for changed symbols.
 ///
@@ -39,8 +22,8 @@ pub enum SymbolChange {
 /// # Errors
 ///
 /// Returns an error if any database update fails.
-pub fn detect_staleness(conn: &Connection, changed_symbols: &[ChangedSymbol]) -> Result<usize> {
-    if changed_symbols.is_empty() {
+pub fn detect_staleness(conn: &Connection, diffs: &[SymbolDiff]) -> Result<usize> {
+    if diffs.is_empty() {
         return Ok(0);
     }
 
@@ -49,7 +32,7 @@ pub fn detect_staleness(conn: &Connection, changed_symbols: &[ChangedSymbol]) ->
         .context("begin staleness transaction")?;
     let mut total_marked = 0;
 
-    let fqns: Vec<&str> = changed_symbols.iter().map(|s| s.fqn.as_str()).collect();
+    let fqns: Vec<&str> = diffs.iter().map(|d| d.fqn.as_str()).collect();
     for chunk in fqns.chunks(BATCH_PARAM_LIMIT) {
         let placeholders = build_batch_placeholders(chunk.len());
         let sql = format!(

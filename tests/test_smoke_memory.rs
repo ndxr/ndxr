@@ -324,9 +324,12 @@ fn search_memory_include_stale_true_vs_false() {
     .unwrap();
 
     // Mark the first one stale.
-    let changed = vec![ndxr::memory::staleness::ChangedSymbol {
+    let changed = vec![ndxr::memory::changes::SymbolDiff {
         fqn: "src/auth.ts::validateToken".to_owned(),
-        change_type: ndxr::memory::staleness::SymbolChange::BodyChanged,
+        file_path: String::new(),
+        kind: ndxr::memory::changes::ChangeKind::BodyChanged,
+        old_value: None,
+        new_value: None,
     }];
     ndxr::memory::staleness::detect_staleness(&conn, &changed).unwrap();
 
@@ -470,9 +473,12 @@ fn staleness_multiple_observations_same_symbol() {
         .unwrap();
     }
 
-    let changed = vec![ndxr::memory::staleness::ChangedSymbol {
+    let changed = vec![ndxr::memory::changes::SymbolDiff {
         fqn,
-        change_type: ndxr::memory::staleness::SymbolChange::BodyChanged,
+        file_path: String::new(),
+        kind: ndxr::memory::changes::ChangeKind::BodyChanged,
+        old_value: None,
+        new_value: None,
     }];
     let marked = ndxr::memory::staleness::detect_staleness(&conn, &changed).unwrap();
     assert_eq!(
@@ -519,17 +525,26 @@ fn staleness_all_change_types_mark_stale() {
     }
 
     let changed = vec![
-        ndxr::memory::staleness::ChangedSymbol {
+        ndxr::memory::changes::SymbolDiff {
             fqn: fqns[0].to_owned(),
-            change_type: ndxr::memory::staleness::SymbolChange::Deleted,
+            file_path: String::new(),
+            kind: ndxr::memory::changes::ChangeKind::Removed,
+            old_value: None,
+            new_value: None,
         },
-        ndxr::memory::staleness::ChangedSymbol {
+        ndxr::memory::changes::SymbolDiff {
             fqn: fqns[1].to_owned(),
-            change_type: ndxr::memory::staleness::SymbolChange::SignatureChanged,
+            file_path: String::new(),
+            kind: ndxr::memory::changes::ChangeKind::SignatureChanged,
+            old_value: None,
+            new_value: None,
         },
-        ndxr::memory::staleness::ChangedSymbol {
+        ndxr::memory::changes::SymbolDiff {
             fqn: fqns[2].to_owned(),
-            change_type: ndxr::memory::staleness::SymbolChange::BodyChanged,
+            file_path: String::new(),
+            kind: ndxr::memory::changes::ChangeKind::BodyChanged,
+            old_value: None,
+            new_value: None,
         },
     ];
     let marked = ndxr::memory::staleness::detect_staleness(&conn, &changed).unwrap();
@@ -564,9 +579,12 @@ fn staleness_observation_linked_to_multiple_symbols_partial_change() {
     .unwrap();
 
     // Only fnB changes.
-    let changed = vec![ndxr::memory::staleness::ChangedSymbol {
+    let changed = vec![ndxr::memory::changes::SymbolDiff {
         fqn: "src/auth.ts::fnB".to_owned(),
-        change_type: ndxr::memory::staleness::SymbolChange::SignatureChanged,
+        file_path: String::new(),
+        kind: ndxr::memory::changes::ChangeKind::SignatureChanged,
+        old_value: None,
+        new_value: None,
     }];
     let marked = ndxr::memory::staleness::detect_staleness(&conn, &changed).unwrap();
     assert_eq!(
