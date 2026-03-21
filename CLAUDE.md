@@ -133,7 +133,7 @@ Approved: `cast_precision_loss`, `cast_possible_truncation`, `cast_sign_loss`, `
 
 - Modules in `lib.rs`: `pub` (used by binary + integration tests)
 - Struct fields: `pub` when needed by other modules, otherwise private
-- Internal helpers: `fn` (not `pub`). Shared constants: `pub(crate)`
+- Internal helpers: `fn` (not `pub`). Shared helpers/constants used across modules: `pub(crate)`
 
 ### File Ordering
 
@@ -175,7 +175,7 @@ Every `.rs` file follows this top-to-bottom order. **Never mix sections.**
 
 ### DRY — Single Source of Truth
 
-- `unix_now()` → `util.rs` | `parse_intent()` → `graph::intent` | `build_fts_query()` → `indexer::tokenizer`
+- `unix_now()` → `util.rs` | `parse_intent()` → `graph::intent` | `build_fts_query()` → `indexer::tokenizer` | `build_batch_placeholders()` → `storage/db.rs`
 - `BATCH_PARAM_LIMIT` → `storage/db.rs` | `collect_index_status()` → `status.rs`
 - `run_capsule_pipeline()` / `commit_tool_record()` → `mcp/server.rs`
 - `get_capsule_hints()` → `graph/intent.rs` | `CapsuleHints` default values live here only
