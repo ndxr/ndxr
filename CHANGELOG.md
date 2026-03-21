@@ -5,6 +5,25 @@ All notable changes to ndxr will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-03-21
+
+### Added
+
+- `search_logic_flow` tool — trace execution paths between any two symbols through the call graph (Yen's K-shortest paths, up to 5 paths ranked by hop count and centrality)
+- AST structural diff tracking — the indexer now detects symbol additions, removals, signature changes, visibility changes, renames, and body changes across re-indexes
+- Anti-pattern detection — warns when the agent repeats dead-end explorations (add then remove), thrashes a single file (4+ changes in 5 minutes), or runs circular searches (3+ similar queries without learning)
+- Capsule responses now include `recent_changes` (what shifted since the session started) and `warnings` (detected anti-patterns)
+- File watcher runs anti-pattern detectors after each re-index
+
+### Improved
+
+- Staleness detection uses richer structural diffs instead of simple hash comparison
+- `ndxr setup` generates CLAUDE.md with the new `search_logic_flow` tool documented
+- Batch placeholder generation consolidated into `build_batch_placeholders()` — 13 inline sites replaced with one shared helper
+- Scoring uses `Cow<'static, str>` for constant reason strings, reducing allocations
+- `compute_tf` borrows during counting, allocates only once per unique token
+- Graph builder pre-allocates HashMaps based on symbol count
+
 ## [0.3.0] - 2026-03-20
 
 ### Added
