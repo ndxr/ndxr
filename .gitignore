@@ -9,6 +9,7 @@
 docs/plans/
 docs/specs/
 docs/superpowers/
+.superpowers/
 .claude/
 
 # OS files
