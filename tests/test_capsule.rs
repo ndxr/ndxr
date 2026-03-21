@@ -33,6 +33,9 @@ fn capsule_respects_token_budget() {
         .unwrap();
 
     assert!(capsule.stats.tokens_used <= capsule.stats.tokens_budget);
+    // Builder initializes new fields empty — MCP layer fills them.
+    assert!(capsule.recent_changes.is_empty());
+    assert!(capsule.warnings.is_empty());
 }
 
 #[test]

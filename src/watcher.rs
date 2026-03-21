@@ -106,6 +106,8 @@ impl FileWatcher {
                                             skipped = stats.skipped,
                                             "watcher re-index complete"
                                         );
+                                        // Run change-based anti-pattern detectors.
+                                        run_antipattern_detectors(&engine_clone.config.db_path);
                                     }
                                 }
                                 Err(e) => {
@@ -143,6 +145,74 @@ impl FileWatcher {
     /// Signals the watcher to stop and drops the OS file watch.
     pub fn shutdown(self) {
         let _ = self.shutdown_tx.send(());
+    }
+}
+
+/// Runs anti-pattern detectors against the most recent session.
+///
+/// Opens a separate database connection (the engine's `Mutex<Connection>`
+/// cannot be used inside `spawn_blocking`). All failures are best-effort:
+/// detection errors are logged but never fail the re-index pipeline.
+fn run_antipattern_detectors(db_path: &Path) {
+    let conn = match crate::storage::db::open_or_create(db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("anti-pattern detection: failed to open db: {e}");
+            return;
+        }
+    };
+    let session_id: String = match conn.query_row(
+        "SELECT id FROM sessions ORDER BY last_active DESC LIMIT 1",
+        [],
+        |row| row.get(0),
+    ) {
+        Ok(id) => id,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return,
+        Err(e) => {
+            tracing::warn!("anti-pattern detection: session query failed: {e}");
+            return;
+        }
+    };
+    let detectors = crate::memory::antipatterns::default_detectors();
+    let ctx = crate::memory::antipatterns::DetectionContext {
+        conn: &conn,
+        session_id: &session_id,
+        window_secs: crate::memory::antipatterns::DEFAULT_WINDOW_SECS,
+    };
+    let patterns =
+        crate::memory::antipatterns::run_all_detectors(&ctx, &detectors).unwrap_or_default();
+    for pattern in &patterns {
+        // Deduplicate: skip if this warning was already stored in this session.
+        let already_warned = match conn.query_row(
+            "SELECT COUNT(*) FROM observations \
+             WHERE session_id = ?1 AND kind = 'warning' AND content LIKE ?2",
+            rusqlite::params![session_id, format!("[{}]%", pattern.rule_name)],
+            |row| row.get::<_, i64>(0),
+        ) {
+            Ok(n) => n > 0,
+            Err(e) => {
+                tracing::warn!("anti-pattern dedup check failed: {e}");
+                false
+            }
+        };
+        if already_warned {
+            continue;
+        }
+
+        tracing::warn!(
+            rule = pattern.rule_name,
+            "anti-pattern detected: {}",
+            pattern.summary
+        );
+        let obs = crate::memory::store::NewObservation {
+            session_id: session_id.clone(),
+            kind: "warning".to_owned(),
+            content: format!("[{}] {}", pattern.rule_name, pattern.summary),
+            headline: Some(pattern.summary.clone()),
+            detail_level: 2,
+            linked_fqns: pattern.involved_fqns.clone(),
+        };
+        let _ = crate::memory::store::save_observation(&conn, &obs);
     }
 }
 

@@ -58,7 +58,7 @@ CLI (clap)  /  MCP Server (rmcp, stdio)
 |---|---|
 | `src/main.rs` | CLI dispatch: index, reindex, mcp, setup, status, search, skeleton |
 | `src/indexer/mod.rs` | `index()` / `reindex()` / `index_paths()` — full indexing pipeline |
-| `src/mcp/server.rs` | MCP server with 8 tools, `CoreEngine`, `run_capsule_pipeline()`, `commit_tool_record()` |
+| `src/mcp/server.rs` | MCP server with 9 tools, `CoreEngine`, `run_capsule_pipeline()`, `commit_tool_record()` |
 | `src/graph/search.rs` | `hybrid_search()` — FTS5 BM25 + TF-IDF + centrality + intent scoring |
 | `src/graph/intent.rs` | `get_capsule_hints()` — intent-specific BFS depth, pivot fraction, skeleton docs |
 | `src/capsule/builder.rs` | `build_capsule()` — token-budgeted context packing with BFS expansion |
@@ -66,6 +66,9 @@ CLI (clap)  /  MCP Server (rmcp, stdio)
 | `src/storage/db.rs` | `open_or_create()`, `BATCH_PARAM_LIMIT` — SQLite schema, WAL, pragmas, migrations |
 | `src/status.rs` | `collect_index_status()` — shared index statistics (CLI + MCP) |
 | `src/watcher.rs` | `FileWatcher::start()` — debounced targeted re-index via `index_paths` |
+| `src/memory/changes.rs` | `snapshot_symbol_state()`, `detect_symbol_diffs()` — AST structural diff tracking |
+| `src/memory/antipatterns.rs` | `run_all_detectors()` — anti-pattern detection framework |
+| `src/graph/pathfinding.rs` | `find_paths()` — Yen's K-shortest paths for logic flow |
 
 ### Dependency Flow (No Cycles)
 
@@ -76,7 +79,7 @@ capsule -> config, graph, skeleton, storage
 indexer -> graph, memory, storage, languages
 graph -> indexer/tokenizer
 memory -> indexer/tokenizer, storage
-watcher -> indexer, graph, storage, languages, mcp/server (CoreEngine)
+watcher -> indexer, graph, memory, storage, languages, mcp/server (CoreEngine)
 ```
 
 ## Coding Rules
@@ -128,6 +131,8 @@ Only for genuine clippy pedantic false positives. **Always include inline justif
 ```
 
 Approved: `cast_precision_loss`, `cast_possible_truncation`, `cast_sign_loss`, `cast_possible_wrap`, `needless_pass_by_value`, `similar_names`
+
+**Not approved** (use a struct instead): `too_many_arguments`
 
 ### Visibility
 
@@ -181,6 +186,7 @@ Every `.rs` file follows this top-to-bottom order. **Never mix sections.**
 - `get_capsule_hints()` → `graph/intent.rs` | `CapsuleHints` default values live here only
 - Test helpers → `tests/helpers/mod.rs`
 - `u32_child_count()` / `u32_named_child_count()` → `indexer/symbols.rs` (tree-sitter `u32` ↔ `usize` bridge)
+- `format_relative_time()` → `mcp/server.rs` | `run_all_detectors()` → `memory/antipatterns.rs`
 
 ### No Dead Code / No Deferred Work
 
@@ -212,6 +218,10 @@ Every `.rs` file follows this top-to-bottom order. **Never mix sections.**
 | `MEMORY_FRACTION` | 0.10 | capsule/builder.rs |
 | `CapsuleHints.pivot_fraction` | 0.70–0.85 (intent-dependent) | graph/intent.rs |
 | BM25 weights | name=10, fqn=5, doc=1, sig=3 | graph/search.rs |
+| `DEFAULT_MAX_PATHS` | 3 | graph/pathfinding.rs |
+| `MAX_PATHS` | 5 | graph/pathfinding.rs |
+| `DEFAULT_WINDOW_SECS` | 300 | memory/antipatterns.rs |
+| `CORRELATION_WINDOW_SECS` | 120 | memory/changes.rs |
 
 ## MCP Tools
 
@@ -224,6 +234,7 @@ Every `.rs` file follows this top-to-bottom order. **Never mix sections.**
 | `get_session_context` | Yes | Recent session history |
 | `search_memory` | **No** | Cross-session observation search |
 | `save_observation` | **No** | Manual observation persistence |
+| `search_logic_flow` | Yes | Trace execution paths between symbols |
 | `index_status` | **No** | Health check and statistics |
 
 ## Gotchas
@@ -239,6 +250,9 @@ Every `.rs` file follows this top-to-bottom order. **Never mix sections.**
 - **tree-sitter `named_child(u32)` vs `named_child_count() -> usize`** — use `u32_named_child_count()` helper in `symbols.rs`. When adding language query patterns, verify node types against `node-types.json` in the cargo registry, don't assume names
 - **Clippy `ignored_unit_patterns`** — `tokio::select!` arms must use `() = async { ... }` not `_ = async { ... }`
 - **Clippy `double_must_use`** — if a struct is `#[must_use]`, functions returning it must NOT also be `#[must_use]` (denied under `clippy::all`)
+- **Clippy `too_many_arguments`** — not on the approved `#[allow]` list. Wrap parameters in a struct instead (see `CapsuleRequest`, `PipelineParams`)
+- **Duration vs timestamp in SQL** — never pass a duration constant directly as a `WHERE timestamp > ?` parameter. Compute `unix_now() - duration` at the call site or inside the function
+- **Warning dedup in both paths** — anti-pattern warnings are saved from both `enrich_warnings` (capsule pipeline) and `run_antipattern_detectors` (watcher). Both paths must deduplicate via `SELECT COUNT(*) ... LIKE '[rule]%'` before inserting
 
 ## Commit Convention
 

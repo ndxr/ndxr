@@ -1,4 +1,4 @@
-//! MCP server implementation with 8 tools for AI coding agents.
+//! MCP server implementation with 9 tools for AI coding agents.
 //!
 //! All shared state is held behind `Arc<CoreEngine>` so the server struct
 //! remains `Clone` as required by rmcp. The `rusqlite::Connection` is protected
@@ -288,6 +288,17 @@ struct GetSessionContextParams {
     include_compressed: Option<bool>,
 }
 
+/// Parameters for the `search_logic_flow` tool.
+#[derive(Deserialize, JsonSchema)]
+struct SearchLogicFlowParams {
+    /// FQN or name of the source symbol.
+    from_symbol: String,
+    /// FQN or name of the target symbol.
+    to_symbol: String,
+    /// Maximum number of paths to find (default: 3, max: 5).
+    max_paths: Option<usize>,
+}
+
 // ---------------------------------------------------------------------------
 // Tool implementations
 // ---------------------------------------------------------------------------
@@ -334,15 +345,16 @@ impl NdxrServer {
             .and_then(intent::parse_intent)
             .unwrap_or_else(|| intent::detect_intent(query));
 
-        let mut pipeline = run_capsule_pipeline(
-            &conn_guard,
-            graph_ref,
+        let mut pipeline = run_capsule_pipeline(&PipelineParams {
+            conn: &conn_guard,
+            graph: graph_ref,
             query,
             intent,
             budget,
-            &self.engine.config.workspace_root,
-            self.engine.config.recency_half_life_days,
-        )?;
+            workspace_root: &self.engine.config.workspace_root,
+            recency_half_life_days: self.engine.config.recency_half_life_days,
+            session_id: &self.session_id,
+        })?;
 
         pipeline.capsule.impact_hints =
             builder::generate_impact_hints(graph_ref, &pipeline.search_results);
@@ -392,15 +404,16 @@ impl NdxrServer {
 
         let intent = intent_override.unwrap_or_else(|| intent::detect_intent(query));
 
-        let pipeline = run_capsule_pipeline(
-            &conn_guard,
-            graph_ref,
+        let pipeline = run_capsule_pipeline(&PipelineParams {
+            conn: &conn_guard,
+            graph: graph_ref,
             query,
             intent,
             budget,
-            &self.engine.config.workspace_root,
-            self.engine.config.recency_half_life_days,
-        )?;
+            workspace_root: &self.engine.config.workspace_root,
+            recency_half_life_days: self.engine.config.recency_half_life_days,
+            session_id: &self.session_id,
+        })?;
 
         let record = capture::ToolCallRecord {
             tool_name: "get_context_capsule".to_owned(),
@@ -761,6 +774,52 @@ impl NdxrServer {
 
         to_json_result(&result)
     }
+
+    /// Trace execution paths between two symbols through the call graph.
+    #[tool(
+        description = "Find execution paths between two symbols through the call graph. Returns up to 3 shortest paths ranked by hop count and node centrality. Useful for understanding how data or control flows from one function to another."
+    )]
+    async fn search_logic_flow(
+        &self,
+        params: Parameters<SearchLogicFlowParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let from = &params.0.from_symbol;
+        let to = &params.0.to_symbol;
+        let max_paths = params.0.max_paths;
+
+        let conn_guard = self.engine.conn.lock().await;
+        let graph_guard = self.engine.graph.read().await;
+
+        let graph_ref = graph_guard
+            .as_ref()
+            .ok_or_else(|| rmcp::ErrorData::internal_error("symbol graph not initialized", None))?;
+
+        let result =
+            crate::graph::pathfinding::find_paths(&conn_guard, graph_ref, from, to, max_paths)
+                .map_err(|e| {
+                    let msg = e.to_string();
+                    if msg.contains("not found") || msg.contains("ambiguous") {
+                        rmcp::ErrorData::invalid_params(msg, None)
+                    } else {
+                        tracing::error!("logic flow search failed: {e}");
+                        rmcp::ErrorData::internal_error("logic flow search failed", None)
+                    }
+                })?;
+
+        let record = capture::ToolCallRecord {
+            tool_name: "search_logic_flow".to_owned(),
+            intent: None,
+            query: Some(format!("{from} -> {to}")),
+            pivot_fqns: vec![from.clone(), to.clone()],
+            result_summary: format!("{} paths found", result.paths_found),
+        };
+        drop(graph_guard);
+
+        commit_tool_record(&conn_guard, &self.session_id, &record);
+        drop(conn_guard);
+
+        to_json_result(&result)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -885,48 +944,57 @@ struct PipelineResult {
     search_results: Vec<crate::graph::search::SearchResult>,
 }
 
+/// Parameters for [`run_capsule_pipeline`].
+struct PipelineParams<'a> {
+    conn: &'a rusqlite::Connection,
+    graph: &'a crate::graph::builder::SymbolGraph,
+    query: &'a str,
+    intent: intent::Intent,
+    budget: usize,
+    workspace_root: &'a std::path::Path,
+    recency_half_life_days: f64,
+    session_id: &'a str,
+}
+
 /// Runs the shared capsule pipeline: search, build capsule, recall memories, populate stats.
 ///
 /// Used by both `run_pipeline` (which adds impact hints) and `get_context_capsule`.
-fn run_capsule_pipeline(
-    conn: &rusqlite::Connection,
-    graph: &crate::graph::builder::SymbolGraph,
-    query: &str,
-    intent: intent::Intent,
-    budget: usize,
-    workspace_root: &std::path::Path,
-    recency_half_life_days: f64,
-) -> Result<PipelineResult, rmcp::ErrorData> {
+fn run_capsule_pipeline(p: &PipelineParams<'_>) -> Result<PipelineResult, rmcp::ErrorData> {
     let search_start = std::time::Instant::now();
-    let outcome =
-        relaxation::search_with_relaxation(conn, graph, query, DEFAULT_MAX_RESULTS, Some(intent))
-            .map_err(|e| rmcp::ErrorData::internal_error(format!("search failed: {e}"), None))?;
+    let outcome = relaxation::search_with_relaxation(
+        p.conn,
+        p.graph,
+        p.query,
+        DEFAULT_MAX_RESULTS,
+        Some(p.intent),
+    )
+    .map_err(|e| rmcp::ErrorData::internal_error(format!("search failed: {e}"), None))?;
     let search_time_ms = search_start.elapsed().as_millis();
     let results = outcome.results;
     let relaxation_applied = outcome.relaxation_applied;
 
     let estimator = TokenEstimator::default();
     let req = CapsuleRequest {
-        conn,
-        graph,
+        conn: p.conn,
+        graph: p.graph,
         search_results: &results,
-        query,
-        intent: &intent,
-        token_budget: budget,
+        query: p.query,
+        intent: &p.intent,
+        token_budget: p.budget,
         estimator: &estimator,
-        workspace_root,
+        workspace_root: p.workspace_root,
     };
     let (mut capsule, memory_budget) = builder::build_capsule(&req)
         .map_err(|e| rmcp::ErrorData::internal_error(format!("capsule build failed: {e}"), None))?;
 
     let pivot_fqns: Vec<String> = results.iter().map(|r| r.fqn.clone()).collect();
     let memories = mem_search::search_memories(
-        conn,
-        query,
+        p.conn,
+        p.query,
         &pivot_fqns,
         DEFAULT_MEMORY_LIMIT,
         false,
-        recency_half_life_days,
+        p.recency_half_life_days,
         None,
     )
     .map_err(|e| rmcp::ErrorData::internal_error(format!("memory search failed: {e}"), None))?;
@@ -947,11 +1015,102 @@ fn run_capsule_pipeline(
     capsule.stats.search_time_ms = search_time_ms;
     capsule.stats.relaxation_applied = relaxation_applied;
 
+    enrich_recent_changes(p.conn, &mut capsule, &pivot_fqns, p.session_id);
+    enrich_warnings(p.conn, &mut capsule, p.session_id);
+
     Ok(PipelineResult {
         capsule,
         pivot_fqns,
         search_results: results,
     })
+}
+
+/// Fills `capsule.recent_changes` with symbol diffs detected since the session started.
+fn enrich_recent_changes(
+    conn: &rusqlite::Connection,
+    capsule: &mut crate::capsule::Capsule,
+    pivot_fqns: &[String],
+    session_id: &str,
+) {
+    let session_start = match conn.query_row(
+        "SELECT started_at FROM sessions WHERE id = ?1",
+        [session_id],
+        |row| row.get::<_, i64>(0),
+    ) {
+        Ok(ts) => ts,
+        Err(rusqlite::Error::QueryReturnedNoRows) => 0,
+        Err(e) => {
+            tracing::warn!("failed to query session start: {e}");
+            0
+        }
+    };
+
+    let recent_changes =
+        crate::memory::changes::query_recent_changes(conn, pivot_fqns, session_start, 20)
+            .unwrap_or_default();
+
+    let now = crate::util::unix_now();
+    capsule.recent_changes = recent_changes
+        .into_iter()
+        .map(|c| crate::capsule::RecentChange {
+            fqn: c.fqn,
+            change: c.change_kind,
+            old: c.old_value,
+            new: c.new_value,
+            when: format_relative_time(now, c.detected_at),
+        })
+        .collect();
+}
+
+/// Runs anti-pattern detectors and fills `capsule.warnings`, persisting new warnings
+/// as observations to avoid duplicates on subsequent runs.
+fn enrich_warnings(
+    conn: &rusqlite::Connection,
+    capsule: &mut crate::capsule::Capsule,
+    session_id: &str,
+) {
+    let detectors = crate::memory::antipatterns::default_detectors();
+    let det_ctx = crate::memory::antipatterns::DetectionContext {
+        conn,
+        session_id,
+        window_secs: crate::memory::antipatterns::DEFAULT_WINDOW_SECS,
+    };
+    let anti_patterns =
+        crate::memory::antipatterns::run_all_detectors(&det_ctx, &detectors).unwrap_or_default();
+
+    for pattern in &anti_patterns {
+        // Deduplicate: don't repeat warnings already stored in this session.
+        let already_warned: bool = match conn.query_row(
+            "SELECT COUNT(*) FROM observations \
+             WHERE session_id = ?1 AND kind = 'warning' AND content LIKE ?2",
+            rusqlite::params![session_id, format!("[{}]%", pattern.rule_name)],
+            |row| row.get::<_, i64>(0),
+        ) {
+            Ok(n) => n > 0,
+            Err(e) => {
+                tracing::warn!("failed to check warning deduplication: {e}");
+                false
+            }
+        };
+
+        if !already_warned {
+            let obs = crate::memory::store::NewObservation {
+                session_id: session_id.to_owned(),
+                kind: "warning".to_owned(),
+                content: format!("[{}] {}", pattern.rule_name, pattern.summary),
+                headline: Some(pattern.summary.clone()),
+                detail_level: 2,
+                linked_fqns: pattern.involved_fqns.clone(),
+            };
+            let _ = crate::memory::store::save_observation(conn, &obs);
+        }
+
+        capsule.warnings.push(crate::capsule::Warning {
+            rule: pattern.rule_name.clone(),
+            summary: pattern.summary.clone(),
+            severity: pattern.severity.as_str().to_owned(),
+        });
+    }
 }
 
 /// Converts a memory search result to a capsule memory entry.
@@ -964,6 +1123,20 @@ fn memory_entry_from(m: &mem_search::MemoryResult) -> crate::capsule::MemoryEntr
         created_at: m.observation.created_at,
         memory_score: m.memory_score,
         is_stale: m.observation.is_stale,
+    }
+}
+
+/// Formats a unix timestamp as relative time (e.g., "2m ago", "1h ago").
+fn format_relative_time(now: i64, then: i64) -> String {
+    let diff = (now - then).max(0);
+    if diff < 60 {
+        format!("{diff}s ago")
+    } else if diff < 3600 {
+        format!("{}m ago", diff / 60)
+    } else if diff < 86400 {
+        format!("{}h ago", diff / 3600)
+    } else {
+        format!("{}d ago", diff / 86400)
     }
 }
 
@@ -1076,4 +1249,38 @@ fn batch_load_impact_metadata(
         }
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_relative_time_seconds() {
+        assert_eq!(format_relative_time(10000, 9970), "30s ago");
+        assert_eq!(format_relative_time(10000, 9941), "59s ago");
+    }
+
+    #[test]
+    fn format_relative_time_minutes() {
+        assert_eq!(format_relative_time(10000, 9940), "1m ago");
+        assert_eq!(format_relative_time(10000, 6401), "59m ago");
+    }
+
+    #[test]
+    fn format_relative_time_hours() {
+        assert_eq!(format_relative_time(100_000, 96400), "1h ago");
+        assert_eq!(format_relative_time(100_000, 13601), "23h ago");
+    }
+
+    #[test]
+    fn format_relative_time_days() {
+        assert_eq!(format_relative_time(200_000, 113_600), "1d ago");
+    }
+
+    #[test]
+    fn format_relative_time_negative_clamped() {
+        // Clock skew: then > now — should clamp to 0s ago.
+        assert_eq!(format_relative_time(1000, 1005), "0s ago");
+    }
 }

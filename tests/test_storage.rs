@@ -23,6 +23,7 @@ fn creates_database_and_tables() {
     assert!(tables.contains(&"term_frequencies".to_string()));
     assert!(tables.contains(&"doc_frequencies".to_string()));
     assert!(tables.contains(&"schema_version".to_string()));
+    assert!(tables.contains(&"symbol_changes".to_string()));
 }
 
 #[test]
@@ -104,7 +105,7 @@ fn schema_version_is_tracked() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(version, 1, "exactly one migration should have run");
+    assert_eq!(version, 2, "all migrations should have run");
 }
 
 #[test]

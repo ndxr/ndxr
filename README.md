@@ -23,6 +23,8 @@ AI coding agents waste most of their context window reading irrelevant files. nd
 | Context window overflow | Truncated or missing code | Token-budgeted capsules fit your limit |
 | No session continuity | Agent forgets past decisions | Session memory persists observations across sessions |
 | Refactoring blind spots | No blast radius awareness | Impact graph shows callers, callees, and risk level |
+| No execution flow visibility | Can't trace call chains | Logic flow traces paths between any two symbols |
+| Repeating mistakes | No behavior analysis | Anti-pattern detection warns about thrashing and dead ends |
 | Slow on large codebases | Re-reads everything | Incremental indexing -- only changed files are re-parsed |
 
 ### Key Features
@@ -33,6 +35,9 @@ AI coding agents waste most of their context window reading irrelevant files. nd
 - **Intent detection** -- Understands "fix the auth bug" vs "explain the auth flow" and adjusts results
 - **Transparent scoring** -- Every result includes a "why" breakdown showing exactly how it was ranked
 - **Impact analysis** -- Shows blast radius before refactoring (low/medium/high based on transitive callers)
+- **Logic flow tracing** -- Find execution paths between any two symbols via Yen's K-shortest paths
+- **AST structural diffs** -- Tracks symbol additions, removals, signature changes, renames across sessions
+- **Anti-pattern detection** -- Warns about dead-end explorations, file thrashing, and circular searches
 - **Auto-relaxation** -- Never returns empty results. Progressively relaxes search if needed
 - **Cross-platform** -- Linux, macOS, Windows. Single static binary, no runtime dependencies
 
@@ -89,7 +94,7 @@ ndxr parses your codebase into symbols (functions, classes, methods, types) and 
                                                   v
                                      +----------------------------+
                                      |       MCP Server           |
-                                     |    8 tools over stdio      |
+                                     |    9 tools over stdio      |
                                      +----------------------------+
 ```
 
@@ -127,6 +132,7 @@ For a deeper dive into internals, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.m
 | `get_context_capsule` | Follow-up context query. Search + capsule + memory, without impact hints. |
 | `get_skeleton` | Render files as signature-only structural outlines. Great for understanding file structure. |
 | `get_impact_graph` | Show callers, callees, and blast radius for a symbol. Use before refactoring. |
+| `search_logic_flow` | Trace execution paths between two symbols. Find how data or control flows from A to B. |
 | `search_memory` | Search past observations and decisions across sessions. |
 | `save_observation` | Persist an insight, decision, or important context to session memory. |
 | `get_session_context` | Review recent session history and observations. |
