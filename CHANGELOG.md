@@ -5,6 +5,19 @@ All notable changes to ndxr will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-03-25
+
+### Added
+
+- `ndxr upgrade` command — check for updates and self-upgrade via GitHub releases with SHA-256 checksum verification
+- Dependency vulnerability scanning (`cargo audit`) in CI and Makefile
+- Clippy nursery lint enforcement in CI and Makefile
+
+### Improved
+
+- MCP error responses no longer leak internal error details — full errors are logged server-side, clients receive generic messages
+- Tool parameter descriptions now surface valid ranges (default/max values) in the MCP schema so agents can discover bounds without trial and error
+
 ## [0.4.0] - 2026-03-21
 
 ### Added
