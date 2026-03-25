@@ -13,6 +13,7 @@ pub mod memory;
 pub mod skeleton;
 pub mod status;
 pub mod storage;
+pub mod upgrade;
 pub mod util;
 pub mod watcher;
 pub mod workspace;

@@ -148,6 +148,7 @@ ndxr setup [--scope project|user]   # Configure Claude Code (.mcp.json + CLAUDE.
 ndxr status [--json]                # Show index statistics
 ndxr search "query" [-n 10] [--intent debug] [--explain]
 ndxr skeleton src/auth.ts [--docs true|false]
+ndxr upgrade [--check] [--force]    # Check for updates and self-upgrade
 ```
 
 Run `ndxr <command> --help` for detailed help on any command.

@@ -1,7 +1,7 @@
 //! ndxr CLI entry point.
 //!
 //! Provides subcommands for indexing, searching, serving MCP, project setup,
-//! status inspection, and file skeleton rendering.
+//! status inspection, file skeleton rendering, and self-upgrade.
 
 use std::path::{Path, PathBuf};
 
@@ -134,6 +134,27 @@ enum Commands {
         #[arg(long, default_value = "true")]
         docs: bool,
     },
+
+    /// Upgrade ndxr to the latest release.
+    #[command(
+        long_about = "Upgrade ndxr to the latest release.\n\n\
+                       Checks for a newer version on GitHub, verifies the checksum,\n\
+                       and replaces the current binary. Works from any directory.\n\n\
+                       Use --check to only check without upgrading.\n\
+                       Use --force to skip the confirmation prompt.",
+        after_help = "EXAMPLES:\n\
+                      \x20 ndxr upgrade              # interactive upgrade\n\
+                      \x20 ndxr upgrade --check      # check only\n\
+                      \x20 ndxr upgrade --force      # skip confirmation"
+    )]
+    Upgrade {
+        /// Only check for updates, do not download or install.
+        #[arg(long)]
+        check: bool,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -152,6 +173,12 @@ fn main() -> Result<()> {
             explain,
         }) => cmd_search(&query, limit, intent.as_deref(), explain),
         Some(Commands::Skeleton { files, docs }) => cmd_skeleton(&files, docs),
+        Some(Commands::Upgrade { check, force }) => {
+            if cmd_upgrade(check, force)? {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
         None => {
             print_quick_start();
             Ok(())
@@ -394,6 +421,73 @@ fn cmd_skeleton(files: &[String], include_docs: bool) -> Result<()> {
     Ok(())
 }
 
+/// Check for updates and optionally upgrade the binary.
+///
+/// Returns `Ok(true)` when no action was taken (update available but not applied),
+/// which `main()` maps to exit code 1.
+fn cmd_upgrade(check: bool, force: bool) -> Result<bool> {
+    let status = ndxr::upgrade::check_for_update()?;
+
+    println!("Current: v{}", status.current);
+    println!("Latest:  v{}", status.latest);
+
+    if !status.is_outdated {
+        println!("Already up to date.");
+        return Ok(false);
+    }
+
+    let Some(asset) = status.asset else {
+        let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+        println!("Update available: v{}", status.latest);
+        println!("No pre-built binary for {platform}.");
+        println!("To upgrade from source: cargo install --git git@github.com:ndxr/ndxr.git");
+        return Ok(true);
+    };
+
+    println!("Update available: v{}", status.latest);
+
+    if check {
+        return Ok(true);
+    }
+
+    if !force {
+        eprint!("Proceed with upgrade? [y/N] ");
+        let _ = std::io::Write::flush(&mut std::io::stderr());
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .context("Failed to read user input")?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            return Ok(true);
+        }
+    }
+
+    println!("Downloading {}...", asset.name);
+    let result = ndxr::upgrade::download_and_verify(&asset)?;
+    if let Some(size) = result.download_size {
+        println!("Downloaded {} ({})", asset.name, format_bytes(size));
+    }
+    println!("Verifying checksum... ok");
+
+    print!("Replacing binary... ");
+    ndxr::upgrade::replace_binary(&result.binary_path)?;
+    println!("ok");
+
+    // Clean up the temp file (best-effort).
+    cleanup_temp_binary(&result.binary_path);
+
+    println!("Upgraded to v{}", status.latest);
+    Ok(false)
+}
+
+/// Best-effort cleanup of the temporary extracted binary and its parent directory.
+fn cleanup_temp_binary(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::remove_dir(parent);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Setup helpers
 // ---------------------------------------------------------------------------
@@ -628,6 +722,7 @@ fn print_quick_start() {
     println!("  status     Show index statistics");
     println!("  search     Search the index");
     println!("  skeleton   Show file skeletons (signatures only)");
+    println!("  upgrade    Upgrade to the latest release");
     println!();
     println!("QUICK START:");
     println!("  1. cd your-project");

@@ -24,6 +24,7 @@ cargo run -- status   # Show index stats
 cargo run -- search "query"        # Search indexed symbols
 cargo run -- mcp                   # Start MCP server on stdio
 cargo run -- setup --scope project # Configure Claude Code integration
+cargo run -- upgrade          # Check for updates and self-upgrade
 ```
 
 ## Architecture
@@ -56,7 +57,7 @@ CLI (clap)  /  MCP Server (rmcp, stdio)
 
 | Entry Point | What It Does |
 |---|---|
-| `src/main.rs` | CLI dispatch: index, reindex, mcp, setup, status, search, skeleton |
+| `src/main.rs` | CLI dispatch: index, reindex, mcp, setup, status, search, skeleton, upgrade |
 | `src/indexer/mod.rs` | `index()` / `reindex()` / `index_paths()` — full indexing pipeline |
 | `src/mcp/server.rs` | MCP server with 9 tools, `CoreEngine`, `run_capsule_pipeline()`, `commit_tool_record()` |
 | `src/graph/search.rs` | `hybrid_search()` — FTS5 BM25 + TF-IDF + centrality + intent scoring |
@@ -69,6 +70,7 @@ CLI (clap)  /  MCP Server (rmcp, stdio)
 | `src/memory/changes.rs` | `snapshot_symbol_state()`, `detect_symbol_diffs()` — AST structural diff tracking |
 | `src/memory/antipatterns.rs` | `run_all_detectors()` — anti-pattern detection framework |
 | `src/graph/pathfinding.rs` | `find_paths()` — Yen's K-shortest paths for logic flow |
+| `src/upgrade.rs` | `check_for_update()`, `download_and_verify()`, `replace_binary()` — self-upgrade via GitHub releases |
 
 ### Dependency Flow (No Cycles)
 
@@ -80,6 +82,7 @@ indexer -> graph, memory, storage, languages
 graph -> indexer/tokenizer
 memory -> indexer/tokenizer, storage
 watcher -> indexer, graph, memory, storage, languages, mcp/server (CoreEngine)
+upgrade -> (external: reqwest, semver, sha2, flate2, tar, zip, self_replace)
 ```
 
 ## Coding Rules
@@ -251,8 +254,11 @@ Every `.rs` file follows this top-to-bottom order. **Never mix sections.**
 - **Clippy `ignored_unit_patterns`** — `tokio::select!` arms must use `() = async { ... }` not `_ = async { ... }`
 - **Clippy `double_must_use`** — if a struct is `#[must_use]`, functions returning it must NOT also be `#[must_use]` (denied under `clippy::all`)
 - **Clippy `too_many_arguments`** — not on the approved `#[allow]` list. Wrap parameters in a struct instead (see `CapsuleRequest`, `PipelineParams`)
+- **Clippy `case_sensitive_file_extension_comparisons`** — `.ends_with(".zip")` denied under pedantic. Use `Path::new(s).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))`
+- **Clippy `nonminimal_bool`** — `!x.is_some_and(|v| cond)` denied. Use `x.is_none_or(|v| !cond)` instead
 - **Duration vs timestamp in SQL** — never pass a duration constant directly as a `WHERE timestamp > ?` parameter. Compute `unix_now() - duration` at the call site or inside the function
 - **Warning dedup in both paths** — anti-pattern warnings are saved from both `enrich_warnings` (capsule pipeline) and `run_antipattern_detectors` (watcher). Both paths must deduplicate via `SELECT COUNT(*) ... LIKE '[rule]%'` before inserting
+- **tar crate rejects malicious paths on creation** — `Builder::append_data` validates paths (rejects `..`, absolute). To test archive extraction security, build raw tar bytes manually (see `create_raw_tar_gz` in `upgrade.rs` tests)
 
 ## Commit Convention
 
