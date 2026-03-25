@@ -105,9 +105,9 @@ impl TokenEstimator {
             return 0;
         }
         #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            clippy::cast_precision_loss
+            clippy::cast_possible_truncation, // token estimate fits in usize
+            clippy::cast_sign_loss,           // ceil of positive ratio is non-negative
+            clippy::cast_precision_loss       // usize->f64 loss negligible for text lengths
         )]
         let tokens = (text.len() as f64 / self.chars_per_token).ceil() as usize;
         tokens

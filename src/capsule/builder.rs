@@ -73,9 +73,9 @@ pub struct CapsuleRequest<'a> {
 ///
 /// The return tuple is `(capsule, memory_budget_tokens)`.
 #[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
+    clippy::cast_possible_truncation, // token counts and budget fit in usize
+    clippy::cast_sign_loss,           // budget arithmetic is always non-negative
+    clippy::cast_precision_loss       // usize->f64 loss negligible for token counts
 )]
 pub fn build_capsule(req: &CapsuleRequest<'_>) -> Result<(Capsule, usize)> {
     let intent_name = req.intent.name().to_owned();

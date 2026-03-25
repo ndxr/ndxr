@@ -178,6 +178,7 @@ Every `.rs` file follows this top-to-bottom order. **Never mix sections.**
 - **Path traversal**: `canonicalize()` + `starts_with(canonical_root)` in `read_file_content()`. Walker: `follow_links(false)`
 - **Resource limits**: `MAX_TOKEN_BUDGET=50k`, `MAX_IMPACT_DEPTH=10`, `MAX_MEMORY_LIMIT=50`, `MAX_SESSION_COUNT=20`, `MAX_OBSERVATION_CONTENT=64KiB`, `FTS_CANDIDATE_LIMIT=100`
 - **MCP safety**: stdout is JSON-RPC only — no `println!()`. All logging to stderr via `tracing`. No raw errors to clients
+- **MCP error pattern**: `tracing::error!("context: {e}"); rmcp::ErrorData::internal_error("generic message", None)` — never `format!("...{e}")` in error data
 
 ## Code Smell Prevention
 
@@ -256,9 +257,14 @@ Every `.rs` file follows this top-to-bottom order. **Never mix sections.**
 - **Clippy `too_many_arguments`** — not on the approved `#[allow]` list. Wrap parameters in a struct instead (see `CapsuleRequest`, `PipelineParams`)
 - **Clippy `case_sensitive_file_extension_comparisons`** — `.ends_with(".zip")` denied under pedantic. Use `Path::new(s).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))`
 - **Clippy `nonminimal_bool`** — `!x.is_some_and(|v| cond)` denied. Use `x.is_none_or(|v| !cond)` instead
+- **Rustdoc private item links** — `[`PrivateConst`]` in a public function's doc creates an intra-doc link that warns because external consumers can't follow it. Use backtick-only notation (`` `PrivateConst` ``) for private items
 - **Duration vs timestamp in SQL** — never pass a duration constant directly as a `WHERE timestamp > ?` parameter. Compute `unix_now() - duration` at the call site or inside the function
 - **Warning dedup in both paths** — anti-pattern warnings are saved from both `enrich_warnings` (capsule pipeline) and `run_antipattern_detectors` (watcher). Both paths must deduplicate via `SELECT COUNT(*) ... LIKE '[rule]%'` before inserting
 - **tar crate rejects malicious paths on creation** — `Builder::append_data` validates paths (rejects `..`, absolute). To test archive extraction security, build raw tar bytes manually (see `create_raw_tar_gz` in `upgrade.rs` tests)
+
+## CI / Makefile Parity
+
+`make ci` and `.github/workflows/ci.yml` must run the same checks. When adding a CI step, add a matching Makefile target (and vice versa).
 
 ## Commit Convention
 
