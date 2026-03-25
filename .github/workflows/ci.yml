@@ -28,5 +28,11 @@ jobs:
       - name: Lint
         run: cargo clippy -- -D warnings
 
+      - name: Lint (nursery)
+        run: cargo clippy -- -W clippy::nursery
+
+      - name: Audit dependencies
+        run: cargo install cargo-audit --locked && cargo audit
+
       - name: Test
         run: cargo test

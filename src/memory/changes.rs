@@ -230,7 +230,7 @@ pub fn detect_symbol_diffs(
 /// Inserts detected diffs into the `symbol_changes` table.
 ///
 /// Correlates each change with the nearest auto-observation within a
-/// [`CORRELATION_WINDOW_SECS`] window. Returns the count of stored changes.
+/// `CORRELATION_WINDOW_SECS` window. Returns the count of stored changes.
 ///
 /// # Errors
 ///

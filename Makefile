@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help build build-release build-all test fmt fmt-check lint ci clean install \
+.PHONY: help build build-release build-all test fmt fmt-check lint lint-nursery audit ci clean install \
 	build-linux-x86_64 build-linux-aarch64 \
 	build-macos-x86_64 build-macos-aarch64 \
 	build-windows-x86_64
@@ -40,7 +40,13 @@ fmt-check: ## Check formatting (CI)
 lint: ## Run clippy lints
 	cargo clippy -- -D warnings
 
-ci: fmt-check lint test ## Run full CI pipeline (fmt-check + lint + test)
+lint-nursery: ## Run clippy nursery lints
+	cargo clippy -- -W clippy::nursery
+
+audit: ## Audit dependencies for known vulnerabilities
+	cargo audit
+
+ci: fmt-check lint lint-nursery audit test ## Run full CI pipeline (fmt-check + lint + nursery + audit + test)
 
 # ---------------------------------------------------------------------------
 # Cross-compilation (release builds)

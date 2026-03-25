@@ -216,7 +216,7 @@ pub struct NdxrServer {
 struct RunPipelineParams {
     /// Description of the task the agent is working on.
     task: String,
-    /// Token budget for the response (default: 8000).
+    /// Token budget for the response (default: 8000, max: 50000).
     max_tokens: Option<usize>,
     /// Override auto-detected intent (debug, test, refactor, modify, understand, explore).
     intent: Option<String>,
@@ -227,7 +227,7 @@ struct RunPipelineParams {
 struct GetContextCapsuleParams {
     /// Search query for finding relevant code.
     query: String,
-    /// Token budget for the response (default: 8000).
+    /// Token budget for the response (default: 8000, max: 50000).
     max_tokens: Option<usize>,
     /// Override auto-detected intent (debug, test, refactor, modify, understand, explore).
     intent: Option<String>,
@@ -247,7 +247,7 @@ struct GetSkeletonParams {
 struct GetImpactGraphParams {
     /// Fully qualified symbol name to analyze.
     symbol_fqn: String,
-    /// Maximum BFS traversal depth (default: 3).
+    /// Maximum BFS traversal depth (default: 3, max: 10).
     depth: Option<usize>,
     /// Include callers (incoming edges) in the result (default: true).
     include_callers: Option<bool>,
@@ -260,7 +260,7 @@ struct GetImpactGraphParams {
 struct SearchMemoryParams {
     /// Natural-language query to search observations.
     query: String,
-    /// Maximum number of results (default: 5).
+    /// Maximum number of results (default: 5, max: 50).
     limit: Option<usize>,
     /// Filter by observation kind (e.g. "decision", "error", "insight").
     kind: Option<String>,
@@ -282,7 +282,7 @@ struct SaveObservationParams {
 /// Parameters for the `get_session_context` tool.
 #[derive(Deserialize, JsonSchema)]
 struct GetSessionContextParams {
-    /// Number of recent sessions to include (default: 3).
+    /// Number of recent sessions to include (default: 3, max: 20).
     session_count: Option<usize>,
     /// Include compressed sessions (default: true).
     include_compressed: Option<bool>,
@@ -449,7 +449,8 @@ impl NdxrServer {
 
         let skeletons = skeleton::reducer::render_skeletons(&conn_guard, files, include_docs)
             .map_err(|e| {
-                rmcp::ErrorData::internal_error(format!("skeleton render failed: {e}"), None)
+                tracing::error!("skeleton render failed: {e}");
+                rmcp::ErrorData::internal_error("failed to render skeleton", None)
             })?;
 
         let result: Vec<SkeletonResult> = skeletons
@@ -599,7 +600,10 @@ impl NdxrServer {
             self.engine.config.recency_half_life_days,
             params.0.kind.as_deref(),
         )
-        .map_err(|e| rmcp::ErrorData::internal_error(format!("memory search failed: {e}"), None))?;
+        .map_err(|e| {
+            tracing::error!("memory search failed: {e}");
+            rmcp::ErrorData::internal_error("failed to search memory", None)
+        })?;
 
         let output: Vec<MemorySearchResult> = results
             .into_iter()
@@ -660,8 +664,10 @@ impl NdxrServer {
             linked_fqns: linked,
         };
 
-        let obs_id = store::save_observation(&conn_guard, &obs)
-            .map_err(|e| rmcp::ErrorData::internal_error(format!("save failed: {e}"), None))?;
+        let obs_id = store::save_observation(&conn_guard, &obs).map_err(|e| {
+            tracing::error!("observation save failed: {e}");
+            rmcp::ErrorData::internal_error("failed to save observation", None)
+        })?;
 
         let _ = store::update_session_active(&conn_guard, &self.session_id);
 
@@ -696,7 +702,8 @@ impl NdxrServer {
 
         let sessions =
             store::get_recent_sessions(&conn_guard, count, include_compressed).map_err(|e| {
-                rmcp::ErrorData::internal_error(format!("session query failed: {e}"), None)
+                tracing::error!("session query failed: {e}");
+                rmcp::ErrorData::internal_error("failed to retrieve session context", None)
             })?;
 
         let mut result = Vec::new();
@@ -755,7 +762,8 @@ impl NdxrServer {
 
         let status = crate::status::collect_index_status(&conn_guard, &self.engine.config.db_path)
             .map_err(|e| {
-                rmcp::ErrorData::internal_error(format!("status query failed: {e}"), None)
+                tracing::error!("index status query failed: {e}");
+                rmcp::ErrorData::internal_error("failed to collect index status", None)
             })?;
 
         drop(conn_guard);
