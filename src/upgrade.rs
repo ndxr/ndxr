@@ -600,7 +600,7 @@ mod tests {
     #[test]
     fn extract_binary_from_tar_gz_succeeds() {
         let archive = create_test_tar_gz(&[
-            ("ndxr", b"fake-binary-content"),
+            (BINARY_NAME, b"fake-binary-content"),
             ("LICENSE", b"license text"),
             ("README.md", b"readme text"),
         ]);
