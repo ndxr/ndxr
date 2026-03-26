@@ -26,7 +26,7 @@ fn capsule_respects_token_budget() {
             search_results: &results,
             query: "auth",
             intent: &ndxr::graph::intent::Intent::Explore,
-            token_budget: 8000,
+            token_budget: 10_000,
             estimator: &estimator,
             workspace_root: &config.workspace_root,
         })
@@ -54,7 +54,7 @@ fn capsule_no_file_in_both_pivots_and_skeletons() {
             search_results: &results,
             query: "validate",
             intent: &ndxr::graph::intent::Intent::Explore,
-            token_budget: 8000,
+            token_budget: 10_000,
             estimator: &estimator,
             workspace_root: &config.workspace_root,
         })
@@ -86,7 +86,7 @@ fn capsule_pivots_contain_file_content() {
             search_results: &results,
             query: "auth",
             intent: &ndxr::graph::intent::Intent::Explore,
-            token_budget: 8000,
+            token_budget: 10_000,
             estimator: &estimator,
             workspace_root: &config.workspace_root,
         })
@@ -154,7 +154,7 @@ fn capsule_with_empty_search_results() {
             search_results: &empty_results,
             query: "nothing",
             intent: &ndxr::graph::intent::Intent::Explore,
-            token_budget: 8000,
+            token_budget: 10_000,
             estimator: &estimator,
             workspace_root: &config.workspace_root,
         })
@@ -181,7 +181,7 @@ fn refactor_intent_produces_more_skeletons_than_explore() {
             search_results: &results,
             query: "validate",
             intent: &ndxr::graph::intent::Intent::Explore,
-            token_budget: 8000,
+            token_budget: 10_000,
             estimator: &estimator,
             workspace_root: &config.workspace_root,
         })
@@ -194,7 +194,7 @@ fn refactor_intent_produces_more_skeletons_than_explore() {
             search_results: &results,
             query: "validate",
             intent: &ndxr::graph::intent::Intent::Refactor,
-            token_budget: 8000,
+            token_budget: 10_000,
             estimator: &estimator,
             workspace_root: &config.workspace_root,
         })

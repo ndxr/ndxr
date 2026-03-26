@@ -208,8 +208,9 @@ Every `.rs` file follows this top-to-bottom order. **Never mix sections.**
 
 | Constant | Value | Location |
 |---|---|---|
-| `DEFAULT_TOOL_TOKEN_BUDGET` | 8,000 | mcp/server.rs |
+| `DEFAULT_TOOL_TOKEN_BUDGET` | 10,000 | mcp/server.rs |
 | `MAX_TOKEN_BUDGET` | 50,000 | mcp/server.rs |
+| `JSON_OVERHEAD_FACTOR` | 0.80 | mcp/server.rs |
 | `DEFAULT_MAX_FILE_SIZE` | 1 MiB | indexer/walker.rs |
 | `BATCH_PARAM_LIMIT` | 900 | storage/db.rs |
 | `FTS_CANDIDATE_LIMIT` | 100 / 50 | graph/search.rs / memory/search.rs |

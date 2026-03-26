@@ -173,8 +173,8 @@ Standard patterns (`.git/`, `node_modules/`, `target/`, hidden files) are exclud
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `NDXR_MAX_TOKENS` | `20000` | Maximum token budget for MCP responses |
-| `NDXR_CHARS_PER_TOKEN` | `3.5` | Characters per token ratio for budget estimation |
+| `NDXR_MAX_TOKENS` | `20000` | Maximum token budget for MCP responses. Set to `-1` for unlimited (no cap, no trimming). |
+| `NDXR_CHARS_PER_TOKEN` | `3.5` | Characters per token ratio for budget estimation. Adjusts how ndxr converts token budgets to character limits. |
 
 ### Setup Scopes
 

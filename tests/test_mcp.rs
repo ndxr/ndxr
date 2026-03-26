@@ -221,7 +221,7 @@ fn capsule_has_pivots() {
         search_results: &results,
         query: "AuthService login",
         intent: &intent,
-        token_budget: 8000,
+        token_budget: 10_000,
         estimator: &estimator,
         workspace_root: &config.workspace_root,
     };

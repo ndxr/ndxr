@@ -31,10 +31,17 @@ use crate::storage::db::{BATCH_PARAM_LIMIT, build_batch_placeholders};
 use crate::{graph, indexer, skeleton, storage};
 
 /// Default token budget for MCP tool responses.
-const DEFAULT_TOOL_TOKEN_BUDGET: usize = 8000;
+const DEFAULT_TOOL_TOKEN_BUDGET: usize = 10_000;
 
 /// Hard upper limit for user-provided `max_tokens` parameters.
 const MAX_TOKEN_BUDGET: usize = 50_000;
+
+/// Fraction of token budget allocated to content (rest reserved for JSON overhead).
+///
+/// The capsule builder budgets tokens for code content, but the final JSON
+/// serialization adds field names, score breakdowns, stats, and structural
+/// overhead. Reserving 20% avoids exceeding the budget after serialization.
+const JSON_OVERHEAD_FACTOR: f64 = 0.80;
 
 /// Default maximum search results.
 const DEFAULT_MAX_RESULTS: usize = 10;
@@ -216,7 +223,7 @@ pub struct NdxrServer {
 struct RunPipelineParams {
     /// Description of the task the agent is working on.
     task: String,
-    /// Token budget for the response (default: 8000, max: 50000).
+    /// Token budget for the response (default: 10000, max: 50000 unless NDXR_MAX_TOKENS=-1).
     max_tokens: Option<usize>,
     /// Override auto-detected intent (debug, test, refactor, modify, understand, explore).
     intent: Option<String>,
@@ -227,7 +234,7 @@ struct RunPipelineParams {
 struct GetContextCapsuleParams {
     /// Search query for finding relevant code.
     query: String,
-    /// Token budget for the response (default: 8000, max: 50000).
+    /// Token budget for the response (default: 10000, max: 50000 unless NDXR_MAX_TOKENS=-1).
     max_tokens: Option<usize>,
     /// Override auto-detected intent (debug, test, refactor, modify, understand, explore).
     intent: Option<String>,
@@ -325,11 +332,7 @@ impl NdxrServer {
         params: Parameters<RunPipelineParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let query = &params.0.task;
-        let budget = params
-            .0
-            .max_tokens
-            .unwrap_or(DEFAULT_TOOL_TOKEN_BUDGET)
-            .min(MAX_TOKEN_BUDGET);
+        let budget = resolve_budget(params.0.max_tokens, self.engine.config.max_tokens);
 
         let conn_guard = self.engine.conn.lock().await;
         let graph_guard = self.engine.graph.read().await;
@@ -345,12 +348,15 @@ impl NdxrServer {
             .and_then(intent::parse_intent)
             .unwrap_or_else(|| intent::detect_intent(query));
 
+        let unlimited = self.engine.config.max_tokens.is_none();
         let mut pipeline = run_capsule_pipeline(&PipelineParams {
             conn: &conn_guard,
             graph: graph_ref,
             query,
             intent,
             budget,
+            chars_per_token: self.engine.config.chars_per_token,
+            unlimited,
             workspace_root: &self.engine.config.workspace_root,
             recency_half_life_days: self.engine.config.recency_half_life_days,
             session_id: &self.session_id,
@@ -376,7 +382,13 @@ impl NdxrServer {
         commit_tool_record(&conn_guard, &self.session_id, &record);
         drop(conn_guard);
 
-        to_json_result(&pipeline.capsule)
+        let json = trim_capsule_to_budget(
+            &mut pipeline.capsule,
+            budget,
+            self.engine.config.chars_per_token,
+            self.engine.config.max_tokens.is_none(),
+        )?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
     /// Search the codebase and build a context capsule (no impact hints).
@@ -388,11 +400,7 @@ impl NdxrServer {
         params: Parameters<GetContextCapsuleParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let query = &params.0.query;
-        let budget = params
-            .0
-            .max_tokens
-            .unwrap_or(DEFAULT_TOOL_TOKEN_BUDGET)
-            .min(MAX_TOKEN_BUDGET);
+        let budget = resolve_budget(params.0.max_tokens, self.engine.config.max_tokens);
         let intent_override = params.0.intent.as_deref().and_then(intent::parse_intent);
 
         let conn_guard = self.engine.conn.lock().await;
@@ -404,12 +412,15 @@ impl NdxrServer {
 
         let intent = intent_override.unwrap_or_else(|| intent::detect_intent(query));
 
-        let pipeline = run_capsule_pipeline(&PipelineParams {
+        let unlimited = self.engine.config.max_tokens.is_none();
+        let mut pipeline = run_capsule_pipeline(&PipelineParams {
             conn: &conn_guard,
             graph: graph_ref,
             query,
             intent,
             budget,
+            chars_per_token: self.engine.config.chars_per_token,
+            unlimited,
             workspace_root: &self.engine.config.workspace_root,
             recency_half_life_days: self.engine.config.recency_half_life_days,
             session_id: &self.session_id,
@@ -431,7 +442,13 @@ impl NdxrServer {
         commit_tool_record(&conn_guard, &self.session_id, &record);
         drop(conn_guard);
 
-        to_json_result(&pipeline.capsule)
+        let json = trim_capsule_to_budget(
+            &mut pipeline.capsule,
+            budget,
+            self.engine.config.chars_per_token,
+            self.engine.config.max_tokens.is_none(),
+        )?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
     /// Render files as signature-only skeletons.
@@ -942,6 +959,23 @@ fn commit_tool_record(
     let _ = store::update_session_active(conn, session_id);
 }
 
+/// Resolves the effective token budget for a tool call.
+///
+/// Uses the per-call `max_tokens` if provided, otherwise falls back to
+/// `DEFAULT_TOOL_TOKEN_BUDGET`. When the config has a token limit (non-unlimited),
+/// clamps to `MAX_TOKEN_BUDGET`. When unlimited (`config_max` is `None`)
+/// and no per-call value, returns `usize::MAX` for a truly uncapped budget.
+fn resolve_budget(per_call: Option<usize>, config_max: Option<usize>) -> usize {
+    match (per_call, config_max) {
+        // Caller specified a budget — always respect it (with cap if not unlimited)
+        (Some(v), Some(_)) => v.min(MAX_TOKEN_BUDGET),
+        (Some(v), None) => v,
+        // No per-call value — use default (with cap), or unlimited
+        (None, Some(_)) => DEFAULT_TOOL_TOKEN_BUDGET,
+        (None, None) => usize::MAX,
+    }
+}
+
 /// Result of the shared capsule pipeline.
 struct PipelineResult {
     /// The assembled context capsule.
@@ -959,6 +993,10 @@ struct PipelineParams<'a> {
     query: &'a str,
     intent: intent::Intent,
     budget: usize,
+    /// Characters-per-token ratio from config (for post-serialization safety net).
+    chars_per_token: f64,
+    /// Whether token budget is unlimited (skip overhead factor and trimming).
+    unlimited: bool,
     workspace_root: &'a std::path::Path,
     recency_half_life_days: f64,
     session_id: &'a str,
@@ -968,6 +1006,19 @@ struct PipelineParams<'a> {
 ///
 /// Used by both `run_pipeline` (which adds impact hints) and `get_context_capsule`.
 fn run_capsule_pipeline(p: &PipelineParams<'_>) -> Result<PipelineResult, rmcp::ErrorData> {
+    let builder_budget = if p.unlimited {
+        p.budget
+    } else {
+        #[allow(
+            clippy::cast_possible_truncation, // token budget fits in usize
+            clippy::cast_sign_loss,           // product is non-negative
+            clippy::cast_precision_loss       // usize->f64 loss negligible for token budgets
+        )]
+        {
+            (p.budget as f64 * JSON_OVERHEAD_FACTOR) as usize
+        }
+    };
+
     let search_start = std::time::Instant::now();
     let outcome = relaxation::search_with_relaxation(
         p.conn,
@@ -981,14 +1032,14 @@ fn run_capsule_pipeline(p: &PipelineParams<'_>) -> Result<PipelineResult, rmcp::
     let results = outcome.results;
     let relaxation_applied = outcome.relaxation_applied;
 
-    let estimator = TokenEstimator::default();
+    let estimator = TokenEstimator::new(p.chars_per_token);
     let req = CapsuleRequest {
         conn: p.conn,
         graph: p.graph,
         search_results: &results,
         query: p.query,
         intent: &p.intent,
-        token_budget: p.budget,
+        token_budget: builder_budget,
         estimator: &estimator,
         workspace_root: p.workspace_root,
     };
@@ -1148,11 +1199,123 @@ fn format_relative_time(now: i64, then: i64) -> String {
     }
 }
 
-/// Serializes a value to pretty JSON and wraps it in a `CallToolResult`.
+/// Serializes a value to compact JSON and wraps it in a `CallToolResult`.
 fn to_json_result<T: Serialize>(value: &T) -> Result<CallToolResult, rmcp::ErrorData> {
-    let json = serde_json::to_string_pretty(value)
-        .map_err(|e| rmcp::ErrorData::internal_error(format!("serialization failed: {e}"), None))?;
+    let json = serde_json::to_string(value).map_err(|e| {
+        tracing::error!("JSON serialization failed: {e}");
+        rmcp::ErrorData::internal_error("serialization failed", None)
+    })?;
     Ok(CallToolResult::success(vec![Content::text(json)]))
+}
+
+/// Serializes a capsule to compact JSON.
+///
+/// # Errors
+///
+/// Returns an error if JSON serialization fails.
+fn serialize_capsule(c: &crate::capsule::Capsule) -> Result<String, rmcp::ErrorData> {
+    serde_json::to_string(c).map_err(|e| {
+        tracing::error!("capsule serialization failed: {e}");
+        rmcp::ErrorData::internal_error("serialization failed", None)
+    })
+}
+
+/// Progressively trims a capsule until its compact JSON fits within the token budget.
+///
+/// Trimming order (least valuable first):
+/// 1. Drop `warnings` and `recent_changes`.
+/// 2. Drop skeletons tail-first (highest `expansion_depth` first).
+/// 3. Replace `content` on lower-ranked pivot files with a placeholder.
+///
+/// Skipped entirely when `unlimited` is true.
+///
+/// # Errors
+///
+/// Returns an error if JSON serialization fails.
+fn trim_capsule_to_budget(
+    capsule: &mut crate::capsule::Capsule,
+    budget: usize,
+    chars_per_token: f64,
+    unlimited: bool,
+) -> Result<String, rmcp::ErrorData> {
+    let json = serialize_capsule(capsule)?;
+
+    if unlimited {
+        return Ok(json);
+    }
+
+    #[allow(
+        clippy::cast_possible_truncation, // budget * chars_per_token fits in usize
+        clippy::cast_sign_loss,           // product is non-negative
+        clippy::cast_precision_loss       // usize->f64 loss negligible for token budgets
+    )]
+    let max_chars = { (budget as f64 * chars_per_token) as usize };
+
+    if json.len() <= max_chars {
+        return Ok(json);
+    }
+
+    tracing::info!(
+        json_len = json.len(),
+        max_chars,
+        "capsule exceeds budget, trimming"
+    );
+
+    // Phase 1: drop warnings and recent_changes
+    if !capsule.warnings.is_empty() || !capsule.recent_changes.is_empty() {
+        capsule.warnings.clear();
+        capsule.recent_changes.clear();
+        let json = serialize_capsule(capsule)?;
+        if json.len() <= max_chars {
+            return Ok(json);
+        }
+    }
+
+    // Phase 2: drop skeletons tail-first (highest expansion_depth first)
+    capsule
+        .skeletons
+        .sort_by(|a, b| b.expansion_depth.cmp(&a.expansion_depth));
+    while !capsule.skeletons.is_empty() {
+        capsule.skeletons.pop();
+        capsule.stats.skeleton_files = capsule.skeletons.len();
+        capsule.stats.skeleton_count = capsule.skeletons.iter().map(|s| s.symbols.len()).sum();
+        let json = serialize_capsule(capsule)?;
+        if json.len() <= max_chars {
+            return Ok(json);
+        }
+    }
+
+    // Phase 3: truncate pivot content (lowest-scored first)
+    capsule.pivots.sort_by(|a, b| {
+        let score_a = a.symbols.first().map_or(0.0, |s| s.score);
+        let score_b = b.symbols.first().map_or(0.0, |s| s.score);
+        score_a
+            .partial_cmp(&score_b)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let estimator = TokenEstimator::new(chars_per_token);
+    for i in 0..capsule.pivots.len() {
+        if capsule.pivots[i].content.contains("[trimmed") {
+            continue;
+        }
+        "[trimmed -- use get_skeleton for this file]".clone_into(&mut capsule.pivots[i].content);
+        // Recalculate pivot token stats after trimming content
+        capsule.stats.tokens_pivots = capsule
+            .pivots
+            .iter()
+            .map(|p| estimator.estimate(&p.content))
+            .sum();
+        capsule.stats.tokens_used = capsule.stats.tokens_pivots
+            + capsule.stats.tokens_skeletons
+            + capsule.stats.tokens_memories;
+        let json = serialize_capsule(capsule)?;
+        if json.len() <= max_chars {
+            return Ok(json);
+        }
+    }
+
+    // Best effort — return whatever we have
+    serialize_capsule(capsule)
 }
 
 /// BFS traversal collecting nodes in a given direction from a start node.
@@ -1290,5 +1453,224 @@ mod tests {
     fn format_relative_time_negative_clamped() {
         // Clock skew: then > now — should clamp to 0s ago.
         assert_eq!(format_relative_time(1000, 1005), "0s ago");
+    }
+
+    // --- resolve_budget tests ---
+
+    #[test]
+    fn resolve_budget_per_call_with_cap() {
+        assert_eq!(resolve_budget(Some(5_000), Some(20_000)), 5_000);
+    }
+
+    #[test]
+    fn resolve_budget_per_call_clamped_to_max() {
+        assert_eq!(
+            resolve_budget(Some(100_000), Some(20_000)),
+            MAX_TOKEN_BUDGET
+        );
+    }
+
+    #[test]
+    fn resolve_budget_per_call_unlimited_no_clamp() {
+        assert_eq!(resolve_budget(Some(100_000), None), 100_000);
+    }
+
+    #[test]
+    fn resolve_budget_zero_is_valid() {
+        // Zero budget is a valid per-call value — callers handle the edge case
+        assert_eq!(resolve_budget(Some(0), Some(20_000)), 0);
+    }
+
+    #[test]
+    fn resolve_budget_default_with_cap() {
+        assert_eq!(
+            resolve_budget(None, Some(20_000)),
+            DEFAULT_TOOL_TOKEN_BUDGET
+        );
+    }
+
+    #[test]
+    fn resolve_budget_default_unlimited() {
+        assert_eq!(resolve_budget(None, None), usize::MAX);
+    }
+
+    // --- trim_capsule_to_budget tests ---
+
+    fn make_test_capsule(content_size: usize) -> crate::capsule::Capsule {
+        use crate::capsule::{
+            Capsule, CapsuleStats, PivotFile, PivotSymbol, SkeletonFile, Warning,
+        };
+        use crate::graph::scoring::ScoreBreakdown;
+        let content = "x".repeat(content_size);
+        Capsule {
+            intent: "test".to_owned(),
+            query: "q".to_owned(),
+            pivots: vec![
+                PivotFile {
+                    path: "high.rs".to_owned(),
+                    content: content.clone(),
+                    symbols: vec![PivotSymbol {
+                        fqn: "high::fn".to_owned(),
+                        kind: "function".to_owned(),
+                        score: 0.9,
+                        why: ScoreBreakdown {
+                            bm25: 0.5,
+                            tfidf: 0.2,
+                            centrality: 0.1,
+                            intent_boost: 0.1,
+                            intent: "test".to_owned(),
+                            matched_terms: vec![],
+                            reason: String::new(),
+                        },
+                    }],
+                },
+                PivotFile {
+                    path: "low.rs".to_owned(),
+                    content,
+                    symbols: vec![PivotSymbol {
+                        fqn: "low::fn".to_owned(),
+                        kind: "function".to_owned(),
+                        score: 0.1,
+                        why: ScoreBreakdown {
+                            bm25: 0.05,
+                            tfidf: 0.02,
+                            centrality: 0.02,
+                            intent_boost: 0.01,
+                            intent: "test".to_owned(),
+                            matched_terms: vec![],
+                            reason: String::new(),
+                        },
+                    }],
+                },
+            ],
+            skeletons: vec![
+                SkeletonFile {
+                    path: "near.rs".to_owned(),
+                    content: "fn near()".to_owned(),
+                    symbols: vec!["near".to_owned()],
+                    expansion_depth: 1,
+                },
+                SkeletonFile {
+                    path: "far.rs".to_owned(),
+                    content: "fn far()".to_owned(),
+                    symbols: vec!["far".to_owned()],
+                    expansion_depth: 3,
+                },
+            ],
+            memories: vec![],
+            impact_hints: vec![],
+            recent_changes: vec![],
+            warnings: vec![Warning {
+                rule: "test".to_owned(),
+                summary: "test warning".to_owned(),
+                severity: "low".to_owned(),
+            }],
+            stats: CapsuleStats {
+                tokens_used: 100,
+                tokens_budget: 1000,
+                tokens_pivots: 80,
+                tokens_skeletons: 15,
+                tokens_memories: 5,
+                pivot_count: 2,
+                pivot_files: 2,
+                skeleton_count: 2,
+                skeleton_files: 2,
+                memory_count: 0,
+                candidates_evaluated: 10,
+                search_time_ms: 5,
+                intent: "test".to_owned(),
+                relaxation_applied: false,
+            },
+        }
+    }
+
+    #[test]
+    fn trim_unlimited_skips_trimming() {
+        let mut capsule = make_test_capsule(10_000);
+        let json = trim_capsule_to_budget(&mut capsule, 100, 3.5, true).unwrap();
+        // Unlimited → no trimming, warnings preserved
+        assert!(json.contains("test warning"));
+        assert!(!json.contains("[trimmed"));
+    }
+
+    #[test]
+    fn trim_under_budget_returns_unchanged() {
+        let mut capsule = make_test_capsule(100);
+        let budget = 100_000; // Very large budget
+        let json = trim_capsule_to_budget(&mut capsule, budget, 3.5, false).unwrap();
+        assert!(json.contains("test warning"));
+        assert!(json.contains("high.rs"));
+        assert!(json.contains("low.rs"));
+    }
+
+    #[test]
+    fn trim_phase1_drops_warnings() {
+        let mut capsule = make_test_capsule(100);
+        // Set budget so capsule just barely exceeds it with warnings but fits without
+        let json_with_warnings = serde_json::to_string(&capsule).unwrap();
+        capsule.warnings.clear();
+        let json_without_warnings = serde_json::to_string(&capsule).unwrap();
+        // Restore warnings
+        capsule.warnings.push(crate::capsule::Warning {
+            rule: "test".to_owned(),
+            summary: "test warning".to_owned(),
+            severity: "low".to_owned(),
+        });
+
+        // Budget that fits without warnings but not with
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
+        let budget_tokens = (json_without_warnings.len() as f64 / 3.5).ceil() as usize + 1;
+
+        // Sanity: warnings must add serialized bytes
+        assert!(
+            json_with_warnings.len() > json_without_warnings.len(),
+            "test capsule warnings must contribute to JSON size"
+        );
+        let json = trim_capsule_to_budget(&mut capsule, budget_tokens, 3.5, false).unwrap();
+        assert!(!json.contains("test warning"));
+    }
+
+    #[test]
+    fn trim_phase2_drops_skeletons_by_depth() {
+        let mut capsule = make_test_capsule(100);
+        // Tiny budget forces skeleton trimming
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
+        let tiny_budget = 50; // ~175 chars — far too small for full capsule
+        let json = trim_capsule_to_budget(&mut capsule, tiny_budget, 3.5, false).unwrap();
+        // All skeletons should be gone at this tiny budget
+        assert!(
+            capsule.skeletons.is_empty(),
+            "all skeletons should be trimmed"
+        );
+        assert_eq!(capsule.stats.skeleton_files, 0);
+        assert!(!json.contains("near.rs"));
+        assert!(!json.contains("far.rs"));
+    }
+
+    #[test]
+    fn trim_phase3_replaces_pivot_content() {
+        let mut capsule = make_test_capsule(5_000);
+        // Budget too small for pivot content
+        let json = trim_capsule_to_budget(&mut capsule, 30, 3.5, false).unwrap();
+        assert!(json.contains("[trimmed"));
+        // Lower-scored pivot (low.rs, score=0.1) should be trimmed first
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let pivots = parsed["pivots"].as_array().unwrap();
+        // After sorting by score, low-scored comes first — both may be trimmed
+        // at this budget, but the trimmed marker should be present
+        let has_trimmed = pivots.iter().any(|p| {
+            p["content"]
+                .as_str()
+                .is_some_and(|c| c.contains("[trimmed"))
+        });
+        assert!(has_trimmed);
     }
 }

@@ -226,7 +226,7 @@ fn full_pipeline_integration() {
             search_results: &results,
             query: "authentication",
             intent: &ndxr::graph::intent::Intent::Explore,
-            token_budget: 8000,
+            token_budget: 10_000,
             estimator: &estimator,
             workspace_root: &config.workspace_root,
         })
