@@ -5,6 +5,28 @@ All notable changes to ndxr will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-03-26
+
+### Added
+
+- Unlimited token budget mode — set `NDXR_MAX_TOKENS=-1` to remove all caps and trimming
+- `NDXR_CHARS_PER_TOKEN` environment variable — tune the characters-per-token ratio for budget estimation
+- Post-serialization safety net — responses that exceed the token budget are progressively trimmed (warnings → skeletons → pivots) instead of failing
+- File watcher now respects `.ndxrignore` and `.gitignore` patterns, with default exclusions for `target/`, `build/`, `bin/`, `node_modules/`, `.git/`, `dist/`
+
+### Changed
+
+- Default per-tool token budget raised from 8,000 to 10,000 tokens
+- JSON overhead accounting — 20% of the token budget is reserved for serialization overhead, preventing oversized MCP responses
+- Compact JSON serialization — MCP responses use minified JSON (~30% smaller)
+
+### Fixed
+
+- **Critical:** File watcher no longer wipes the entire index when re-indexing a single changed file
+- **Critical:** File watcher no longer indexes build artifacts from `target/` and other ignored directories
+- `skeleton --docs false` now correctly disables docstrings in CLI output
+- Windows compatibility fix for tar.gz extraction test
+
 ## [0.5.0] - 2026-03-25
 
 ### Added
