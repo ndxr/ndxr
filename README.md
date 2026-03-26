@@ -157,7 +157,7 @@ Run `ndxr <command> --help` for detailed help on any command.
 
 ### .ndxrignore
 
-Exclude paths from indexing. Uses gitignore syntax. Place in workspace root.
+Exclude paths from indexing and file watching. Uses gitignore syntax. Place in workspace root.
 
 ```gitignore
 dist/
@@ -167,7 +167,12 @@ vendor/
 __fixtures__/
 ```
 
-Standard patterns (`.git/`, `node_modules/`, `target/`, hidden files) are excluded automatically.
+If `.ndxrignore` is not present, ndxr falls back to `.gitignore`. When both files exist, patterns from both are applied.
+
+The following directories are always excluded (both indexing and file watching):
+
+- `.git/`, `.ndxr/`, `node_modules/`, `target/`, `build/`, `bin/`, `dist/`
+- Hidden files and directories
 
 ### Environment Variables
 

@@ -261,14 +261,11 @@ pub fn index_paths(config: &NdxrConfig, changed_paths: &[PathBuf]) -> Result<Ind
         })
         .collect();
 
-    // Add explicitly deleted files that diff_files wouldn't have caught
-    // (since they weren't in `existing`).
-    let all_deleted: Vec<PathBuf> = diff
-        .iter()
-        .filter(|(_, status)| matches!(status, manifest::FileStatus::Deleted))
-        .map(|(path, _)| path.clone())
-        .chain(deleted_rel)
-        .collect();
+    // diff_files marks every indexed file absent from `current_files` as
+    // Deleted.  Since index_paths receives only a targeted subset, those
+    // diff-sourced deletions are false positives.  Use only the explicit
+    // deletion list (files passed to us that no longer exist on disk).
+    let all_deleted: Vec<PathBuf> = deleted_rel;
 
     stats.skipped = diff
         .iter()

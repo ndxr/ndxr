@@ -11,6 +11,7 @@ use crate::graph::builder::SymbolGraph;
 use crate::languages;
 use crate::mcp::server::CoreEngine;
 use anyhow::Result;
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 
 /// Active file watcher that monitors the workspace for changes.
@@ -33,11 +34,9 @@ impl FileWatcher {
     /// debounce window closes, affected files are incrementally re-indexed via
     /// the standard indexing pipeline.
     ///
-    /// The watcher filters events through the same rules as the indexer:
-    /// `.gitignore`/`.ndxrignore` are **not** evaluated at the event level
-    /// (the OS notifier does not support them), but the indexer itself will
-    /// skip ignored files. The watcher does filter out `.ndxr/` paths and
-    /// files with unsupported extensions to avoid unnecessary wake-ups.
+    /// The watcher filters events through `.ndxrignore` and `.gitignore`
+    /// patterns (loaded once at startup), as well as `.ndxr/` paths and files
+    /// with unsupported extensions.
     ///
     /// # Errors
     ///
@@ -63,6 +62,7 @@ impl FileWatcher {
 
         // Spawn debounce + re-index task.
         let ws_root = workspace_root.clone();
+        let ignore_matcher = build_ignore_matcher(&ws_root);
         tokio::spawn(async move {
             let mut pending: HashSet<PathBuf> = HashSet::new();
             let mut debounce_deadline: Option<tokio::time::Instant> = None;
@@ -72,7 +72,7 @@ impl FileWatcher {
                     _ = &mut shutdown_rx => break,
                     Some(event) = event_rx.recv() => {
                         for path in event.paths {
-                            if should_process_path(&ws_root, &path) {
+                            if should_process_path(&ws_root, &path, &ignore_matcher) {
                                 pending.insert(path);
                             }
                         }
@@ -225,11 +225,52 @@ fn rebuild_graph(db_path: &Path) -> Option<SymbolGraph> {
     Some(graph)
 }
 
+/// Default directories always excluded from the file watcher.
+const DEFAULT_IGNORED_DIRS: &[&str] = &[
+    "target/",
+    "build/",
+    "bin/",
+    "node_modules/",
+    ".git/",
+    "dist/",
+];
+
+/// Builds an ignore matcher from `.ndxrignore` and `.gitignore` files.
+///
+/// Always includes a baseline set of commonly ignored directories
+/// (`target/`, `build/`, `bin/`, `node_modules/`, `.git/`, `dist/`).
+/// Then loads `.ndxrignore` (project-specific overrides), followed by
+/// `.gitignore` as a fallback.  If neither file exists, only the default
+/// patterns apply.
+fn build_ignore_matcher(workspace_root: &Path) -> Gitignore {
+    let mut builder = GitignoreBuilder::new(workspace_root);
+
+    for pattern in DEFAULT_IGNORED_DIRS {
+        let _ = builder.add_line(None, pattern);
+    }
+
+    let ndxrignore = workspace_root.join(".ndxrignore");
+    if ndxrignore.is_file() {
+        let _ = builder.add(ndxrignore);
+    }
+
+    let gitignore = workspace_root.join(".gitignore");
+    if gitignore.is_file() {
+        let _ = builder.add(gitignore);
+    }
+
+    builder.build().unwrap_or_else(|e| {
+        tracing::warn!("failed to build ignore matcher: {e}");
+        Gitignore::empty()
+    })
+}
+
 /// Checks if a file event path should trigger re-indexing.
 ///
-/// Returns `false` for paths inside `.ndxr/`, paths that are not regular files,
-/// and paths with unsupported file extensions. Returns `true` otherwise.
-fn should_process_path(workspace_root: &Path, path: &Path) -> bool {
+/// Returns `false` for paths inside `.ndxr/`, paths matched by
+/// `.ndxrignore`/`.gitignore`, paths that are not regular files, and paths
+/// with unsupported file extensions.  Returns `true` otherwise.
+fn should_process_path(workspace_root: &Path, path: &Path, ignore: &Gitignore) -> bool {
     // Skip if path contains .ndxr/ component.
     if path.components().any(|c| c.as_os_str() == ".ndxr") {
         return false;
@@ -237,6 +278,16 @@ fn should_process_path(workspace_root: &Path, path: &Path) -> bool {
 
     // Must be relative to the workspace root.
     if !path.starts_with(workspace_root) {
+        return false;
+    }
+
+    // Skip if matched by .ndxrignore / .gitignore (checks parent dirs too,
+    // so a pattern like `target/` also excludes `target/debug/build.rs`).
+    let rel = path.strip_prefix(workspace_root).unwrap_or(path);
+    if ignore
+        .matched_path_or_any_parents(rel, path.is_dir())
+        .is_ignore()
+    {
         return false;
     }
 
@@ -260,6 +311,11 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    /// Helper: empty matcher (no ignore files).
+    fn empty_ignore(root: &Path) -> Gitignore {
+        GitignoreBuilder::new(root).build().unwrap()
+    }
+
     #[test]
     fn skips_ndxr_directory() {
         let tmp = TempDir::new().unwrap();
@@ -268,7 +324,7 @@ mod tests {
         fs::create_dir_all(ndxr_file.parent().unwrap()).unwrap();
         fs::write(&ndxr_file, "data").unwrap();
 
-        assert!(!should_process_path(root, &ndxr_file));
+        assert!(!should_process_path(root, &ndxr_file, &empty_ignore(root)));
     }
 
     #[test]
@@ -278,7 +334,7 @@ mod tests {
         let file = root.join("notes.txt");
         fs::write(&file, "hello").unwrap();
 
-        assert!(!should_process_path(root, &file));
+        assert!(!should_process_path(root, &file, &empty_ignore(root)));
     }
 
     #[test]
@@ -288,7 +344,7 @@ mod tests {
         let file = root.join("main.ts");
         fs::write(&file, "export function main() {}").unwrap();
 
-        assert!(should_process_path(root, &file));
+        assert!(should_process_path(root, &file, &empty_ignore(root)));
     }
 
     #[test]
@@ -298,7 +354,7 @@ mod tests {
         let file = root.join("Makefile");
         fs::write(&file, "all:").unwrap();
 
-        assert!(!should_process_path(root, &file));
+        assert!(!should_process_path(root, &file, &empty_ignore(root)));
     }
 
     #[test]
@@ -308,7 +364,7 @@ mod tests {
         let dir = root.join("src");
         fs::create_dir_all(&dir).unwrap();
 
-        assert!(!should_process_path(root, &dir));
+        assert!(!should_process_path(root, &dir, &empty_ignore(root)));
     }
 
     #[test]
@@ -317,7 +373,7 @@ mod tests {
         let root = tmp.path();
         let outside = PathBuf::from("/tmp/outside/main.ts");
 
-        assert!(!should_process_path(root, &outside));
+        assert!(!should_process_path(root, &outside, &empty_ignore(root)));
     }
 
     #[test]
@@ -327,7 +383,7 @@ mod tests {
         let file = root.join("app.py");
         fs::write(&file, "def main(): pass").unwrap();
 
-        assert!(should_process_path(root, &file));
+        assert!(should_process_path(root, &file, &empty_ignore(root)));
     }
 
     #[test]
@@ -337,6 +393,112 @@ mod tests {
         let file = root.join("lib.rs");
         fs::write(&file, "fn main() {}").unwrap();
 
-        assert!(should_process_path(root, &file));
+        assert!(should_process_path(root, &file, &empty_ignore(root)));
+    }
+
+    #[test]
+    fn skips_gitignored_paths() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        fs::write(root.join(".gitignore"), "target/\n").unwrap();
+        let target_file = root.join("target").join("debug").join("build.rs");
+        fs::create_dir_all(target_file.parent().unwrap()).unwrap();
+        fs::write(&target_file, "fn main() {}").unwrap();
+
+        let matcher = build_ignore_matcher(root);
+        assert!(!should_process_path(root, &target_file, &matcher));
+    }
+
+    #[test]
+    fn skips_ndxrignored_paths() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        fs::write(root.join(".ndxrignore"), "generated/\n").unwrap();
+        let gen_file = root.join("generated").join("schema.rs");
+        fs::create_dir_all(gen_file.parent().unwrap()).unwrap();
+        fs::write(&gen_file, "pub struct S {}").unwrap();
+
+        let matcher = build_ignore_matcher(root);
+        assert!(!should_process_path(root, &gen_file, &matcher));
+    }
+
+    #[test]
+    fn ndxrignore_and_gitignore_both_apply() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        fs::write(root.join(".gitignore"), "target/\n").unwrap();
+        fs::write(root.join(".ndxrignore"), "vendor/\n").unwrap();
+
+        let matcher = build_ignore_matcher(root);
+
+        // gitignore pattern
+        let target_file = root.join("target").join("lib.rs");
+        fs::create_dir_all(target_file.parent().unwrap()).unwrap();
+        fs::write(&target_file, "fn a() {}").unwrap();
+        assert!(!should_process_path(root, &target_file, &matcher));
+
+        // ndxrignore pattern
+        let vendor_file = root.join("vendor").join("dep.rs");
+        fs::create_dir_all(vendor_file.parent().unwrap()).unwrap();
+        fs::write(&vendor_file, "fn b() {}").unwrap();
+        assert!(!should_process_path(root, &vendor_file, &matcher));
+
+        // non-ignored file passes through
+        let src_file = root.join("src").join("main.rs");
+        fs::create_dir_all(src_file.parent().unwrap()).unwrap();
+        fs::write(&src_file, "fn main() {}").unwrap();
+        assert!(should_process_path(root, &src_file, &matcher));
+    }
+
+    #[test]
+    fn gitignore_fallback_when_no_ndxrignore() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        fs::write(root.join(".gitignore"), "build/\n").unwrap();
+        // No .ndxrignore
+
+        let matcher = build_ignore_matcher(root);
+
+        let build_file = root.join("build").join("output.rs");
+        fs::create_dir_all(build_file.parent().unwrap()).unwrap();
+        fs::write(&build_file, "fn x() {}").unwrap();
+        assert!(!should_process_path(root, &build_file, &matcher));
+    }
+
+    #[test]
+    fn no_ignore_files_allows_source_paths() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        // No .gitignore, no .ndxrignore
+
+        let matcher = build_ignore_matcher(root);
+
+        let file = root.join("src").join("lib.rs");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "fn y() {}").unwrap();
+        assert!(should_process_path(root, &file, &matcher));
+    }
+
+    #[test]
+    fn default_patterns_skip_target_and_build() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        // No .gitignore, no .ndxrignore — defaults still apply
+
+        let matcher = build_ignore_matcher(root);
+
+        for dir in &["target", "build", "bin", "node_modules", "dist"] {
+            let file = root.join(dir).join("output.rs");
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(&file, "fn z() {}").unwrap();
+            assert!(
+                !should_process_path(root, &file, &matcher),
+                "{dir}/ should be excluded by default"
+            );
+        }
     }
 }
