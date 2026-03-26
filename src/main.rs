@@ -131,7 +131,7 @@ enum Commands {
         /// File paths (relative to workspace root).
         files: Vec<String>,
         /// Include docstrings.
-        #[arg(long, default_value = "true")]
+        #[arg(long, default_value_t = true, num_args = 1)]
         docs: bool,
     },
 
