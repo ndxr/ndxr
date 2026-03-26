@@ -726,10 +726,10 @@ fn print_quick_start() {
     println!();
     println!("QUICK START:");
     println!("  1. cd your-project");
-    println!("  2. ndxr setup                 # writes .mcp.json + CLAUDE.md");
-    println!("  3. ndxr index                 # build the index");
-    println!("  4. ndxr status                # verify the index");
-    println!("  5. ndxr search \"auth flow\"     # search the codebase");
+    println!("  2. ndxr setup              # writes .mcp.json + CLAUDE.md");
+    println!("  3. ndxr index              # build the index");
+    println!("  4. ndxr status             # verify the index");
+    println!("  5. ndxr search \"auth flow\" # search the codebase");
     println!();
     println!("Run 'ndxr <command> --help' for detailed help on a command.");
 }
