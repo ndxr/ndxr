@@ -191,6 +191,8 @@ Every `.rs` file follows this top-to-bottom order. **Never mix sections.**
 - Test helpers → `tests/helpers/mod.rs`
 - `u32_child_count()` / `u32_named_child_count()` → `indexer/symbols.rs` (tree-sitter `u32` ↔ `usize` bridge)
 - `format_relative_time()` → `mcp/server.rs` | `run_all_detectors()` → `memory/antipatterns.rs`
+- `resolve_budget()` / `trim_capsule_to_budget()` / `serialize_capsule()` → `mcp/server.rs`
+- `build_ignore_matcher()` → `watcher.rs` | `DEFAULT_IGNORED_DIRS` → `watcher.rs`
 
 ### No Dead Code / No Deferred Work
 
@@ -211,6 +213,8 @@ Every `.rs` file follows this top-to-bottom order. **Never mix sections.**
 | `DEFAULT_TOOL_TOKEN_BUDGET` | 10,000 | mcp/server.rs |
 | `MAX_TOKEN_BUDGET` | 50,000 | mcp/server.rs |
 | `JSON_OVERHEAD_FACTOR` | 0.80 | mcp/server.rs |
+| `DEFAULT_MAX_TOKENS` | 20,000 | config.rs |
+| `DEFAULT_CHARS_PER_TOKEN` | 3.5 | config.rs |
 | `DEFAULT_MAX_FILE_SIZE` | 1 MiB | indexer/walker.rs |
 | `BATCH_PARAM_LIMIT` | 900 | storage/db.rs |
 | `FTS_CANDIDATE_LIMIT` | 100 / 50 | graph/search.rs / memory/search.rs |
@@ -227,6 +231,7 @@ Every `.rs` file follows this top-to-bottom order. **Never mix sections.**
 | `MAX_PATHS` | 5 | graph/pathfinding.rs |
 | `DEFAULT_WINDOW_SECS` | 300 | memory/antipatterns.rs |
 | `CORRELATION_WINDOW_SECS` | 120 | memory/changes.rs |
+| `DEFAULT_IGNORED_DIRS` | 6 dirs | watcher.rs |
 
 ## MCP Tools
 
@@ -262,6 +267,11 @@ Every `.rs` file follows this top-to-bottom order. **Never mix sections.**
 - **Duration vs timestamp in SQL** — never pass a duration constant directly as a `WHERE timestamp > ?` parameter. Compute `unix_now() - duration` at the call site or inside the function
 - **Warning dedup in both paths** — anti-pattern warnings are saved from both `enrich_warnings` (capsule pipeline) and `run_antipattern_detectors` (watcher). Both paths must deduplicate via `SELECT COUNT(*) ... LIKE '[rule]%'` before inserting
 - **tar crate rejects malicious paths on creation** — `Builder::append_data` validates paths (rejects `..`, absolute). To test archive extraction security, build raw tar bytes manually (see `create_raw_tar_gz` in `upgrade.rs` tests)
+- **Edition 2024 `set_var`/`remove_var` are unsafe** — wrap in `unsafe {}` blocks in tests. Consolidate all env-var-mutating assertions into a single test function to avoid parallel test races
+- **Clippy `assigning_clones`** — `field = "literal".to_owned()` denied under pedantic. Use `"literal".clone_into(&mut field)` instead
+- **`diff_files()` marks absent files as deleted** — designed for full workspace diffs. Never call with a partial file list (e.g. from `index_paths`) and use its deletion results, or it will wipe unrelated indexed files
+- **Watcher ignore matcher is built once at startup** — loads `.ndxrignore` + `.gitignore` + default dirs (`target/`, `build/`, `bin/`, `node_modules/`, `.git/`, `dist/`). Changes to ignore files require MCP server restart
+- **MCP server graph is in-memory only** — built at startup from the DB. External `ndxr index`/`ndxr reindex` updates the DB but not the running server's graph. File watcher rebuilds it; otherwise restart required
 
 ## CI / Makefile Parity
 
@@ -274,3 +284,37 @@ Every `.rs` file follows this top-to-bottom order. **Never mix sections.**
 ## Changelog
 
 User-facing, compact bullets. Describe what users can **do**, not internals. [Keep a Changelog](https://keepachangelog.com/) format.
+
+## ndxr context engine
+
+ndxr indexes this codebase and provides you with only the relevant code for each task.
+
+**Before modifying any file**, call `mcp__ndxr__run_pipeline` with a description of your task.
+Do not read files directly unless run_pipeline tells you to.
+
+### Intent
+
+Pass `intent` to `run_pipeline` to get optimized context for your task:
+
+| Intent | When to use | What it optimizes |
+|--------|------------|-------------------|
+| `debug` | Fixing bugs, errors, crashes | Error paths, high-connectivity code |
+| `test` | Writing or finding tests | Test files, test fixtures |
+| `refactor` | Restructuring, renaming | Public APIs, blast radius, callers |
+| `modify` | Adding features, extending | Balanced text + semantic match |
+| `understand` | Learning how code works | Documentation, module structure, entry points |
+| `explore` | General browsing (default) | Documented, central code |
+
+Example: `mcp__ndxr__run_pipeline({ task: "fix the auth crash", intent: "debug" })`
+
+### Tools
+
+- `mcp__ndxr__run_pipeline` -- use this FIRST for every task (pass intent for best results)
+- `mcp__ndxr__get_context_capsule` -- follow-up context queries (also accepts intent)
+- `mcp__ndxr__get_skeleton` -- get file signatures without bodies
+- `mcp__ndxr__get_impact_graph` -- check blast radius before refactoring
+- `mcp__ndxr__search_memory` -- search past session insights
+- `mcp__ndxr__save_observation` -- save important decisions or insights
+- `mcp__ndxr__search_logic_flow` -- trace execution paths between symbols
+- `mcp__ndxr__get_session_context` -- review session history
+- `mcp__ndxr__index_status` -- check if index is ready
