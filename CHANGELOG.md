@@ -5,6 +5,29 @@ All notable changes to ndxr will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-03-27
+
+### Added
+
+- `reindex` MCP tool — force a full re-index and graph rebuild from within the AI agent session
+- `activity` CLI command — view recent MCP tool activity with `--limit` and `--follow` (live tail) flags
+- Bridge symbols in `search_logic_flow` — when no direct path exists, shows shared callers, callees, or file neighbors as connection hints
+- `modify` intent with boost rules for registry/entry-point files and highly-connected exported symbols
+
+### Improved
+
+- Watcher hot-reloads `.ndxrignore` and `.gitignore` changes automatically — no restart needed
+- Memory capture stores longer queries (200 chars) and FQNs (120 chars) for better cross-session search
+- Observation ordering is deterministic — `id` tiebreaker prevents non-deterministic results for same-second entries
+- Activity log uses center-aligned kind tags for cleaner output
+- `ndxr setup` generates stronger CLAUDE.md instructions — mandatory `run_pipeline` before any file access
+- `ndxr upgrade` now reminds you to run `ndxr setup` to update CLAUDE.md
+
+### Changed
+
+- `reindex` skips symbol change detection (avoids spurious "all symbols added" noise after full reset)
+- `reindex` excluded from auto-capture to avoid polluting session memory
+
 ## [0.6.0] - 2026-03-26
 
 ### Added
