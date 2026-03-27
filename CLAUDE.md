@@ -74,6 +74,8 @@ CLI (clap)  /  MCP Server (rmcp, stdio)
 
 ### Dependency Flow (No Cycles)
 
+**Rule:** shared helpers must live in the module both callers already depend on — never introduce a reverse dependency arrow.
+
 ```
 main.rs -> all modules
 mcp/server -> capsule, config, graph, indexer, memory, skeleton, storage, watcher
@@ -274,6 +276,7 @@ Every `.rs` file follows this top-to-bottom order. **Never mix sections.**
 - **`diff_files()` marks absent files as deleted** — designed for full workspace diffs. Never call with a partial file list (e.g. from `index_paths`) and use its deletion results, or it will wipe unrelated indexed files
 - **Watcher ignore matcher hot-reloads** — rebuilt automatically when `.ndxrignore` or `.gitignore` changes. Default exclusions (`target/`, `build/`, `bin/`, `node_modules/`, `.git/`, `dist/`) always apply
 - **MCP server graph is in-memory only** — built at startup from the DB. External `ndxr index`/`ndxr reindex` updates the DB but not the running server's graph. File watcher rebuilds it; otherwise restart required
+- **Observation ordering needs id tiebreaker** — `ORDER BY created_at` alone is non-deterministic for rows inserted within the same second. Always add `, id ASC/DESC` as secondary sort
 
 ## CI / Makefile Parity
 

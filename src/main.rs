@@ -497,6 +497,8 @@ fn cmd_upgrade(check: bool, force: bool) -> Result<bool> {
     cleanup_temp_binary(&result.binary_path);
 
     println!("Upgraded to v{}", status.latest);
+    println!();
+    println!("Run `ndxr setup` to update your CLAUDE.md with the latest instructions.");
     Ok(false)
 }
 
@@ -683,8 +685,7 @@ const CLAUDE_MD_SECTION: &str = "\
 
 ndxr indexes this codebase and provides you with only the relevant code for each task.
 
-**Before modifying any file**, call `mcp__ndxr__run_pipeline` with a description of your task.
-Do not read files directly unless run_pipeline tells you to.
+**IMPORTANT: You MUST call `mcp__ndxr__run_pipeline` BEFORE reading, modifying, or reasoning about any source file.** Do not use Read, Grep, or Glob to explore the codebase — ndxr returns exactly the context you need. Only read files that ndxr includes in its response.
 
 ### Intent
 
@@ -703,8 +704,8 @@ Example: `mcp__ndxr__run_pipeline({ task: \"fix the auth crash\", intent: \"debu
 
 ### Tools
 
-- `mcp__ndxr__run_pipeline` -- use this FIRST for every task (pass intent for best results)
-- `mcp__ndxr__get_context_capsule` -- follow-up context queries (also accepts intent)
+- `mcp__ndxr__run_pipeline` -- call this FIRST for every task (pass intent for best results)
+- `mcp__ndxr__get_context_capsule` -- follow-up context when you need more (also accepts intent)
 - `mcp__ndxr__get_skeleton` -- get file signatures without bodies
 - `mcp__ndxr__get_impact_graph` -- check blast radius before refactoring
 - `mcp__ndxr__search_memory` -- search past session insights
