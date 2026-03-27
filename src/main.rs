@@ -567,34 +567,40 @@ fn print_recent_activity(conn: &rusqlite::Connection, limit: usize) -> Result<()
 fn cmd_activity_follow(conn: &rusqlite::Connection, initial_limit: usize) -> Result<()> {
     print_recent_activity(conn, initial_limit)?;
 
-    let mut last_seen: i64 = conn.query_row(
-        "SELECT COALESCE(MAX(created_at), 0) FROM observations",
-        [],
-        |row| row.get(0),
-    )?;
+    let (mut last_seen_ts, mut last_seen_id): (i64, i64) = conn
+        .query_row(
+            "SELECT COALESCE(created_at, 0), COALESCE(id, 0) \
+         FROM observations ORDER BY created_at DESC, id DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap_or((0, 0));
 
     println!("\n--- watching for new activity (Ctrl+C to stop) ---\n");
 
     let mut stmt = conn.prepare(
-        "SELECT kind, headline, content, datetime(created_at, 'unixepoch', 'localtime'), created_at \
-         FROM observations WHERE created_at > ?1 ORDER BY created_at ASC, id ASC",
+        "SELECT kind, headline, content, datetime(created_at, 'unixepoch', 'localtime'), created_at, id \
+         FROM observations \
+         WHERE created_at > ?1 OR (created_at = ?1 AND id > ?2) \
+         ORDER BY created_at ASC, id ASC",
     )?;
 
     loop {
         std::thread::sleep(std::time::Duration::from_secs(1));
 
-        let rows = stmt.query_map([last_seen], |row| {
+        let rows = stmt.query_map(rusqlite::params![last_seen_ts, last_seen_id], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, Option<String>>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
             ))
         })?;
 
         for row in rows {
-            let (kind, headline, content, time, created_at) = row?;
+            let (kind, headline, content, time, created_at, id) = row?;
             let display = headline.as_deref().unwrap_or(content.as_str());
             let kind_tag = match kind.as_str() {
                 "auto" => "tool",
@@ -602,7 +608,8 @@ fn cmd_activity_follow(conn: &rusqlite::Connection, initial_limit: usize) -> Res
                 other => other,
             };
             println!("{time}  [{kind_tag:^8}]  {display}");
-            last_seen = created_at;
+            last_seen_ts = created_at;
+            last_seen_id = id;
         }
     }
 }
