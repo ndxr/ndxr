@@ -1505,9 +1505,9 @@ fn e2e_activity_shows_observations() {
     // Run activity command and verify output.
     let output = ndxr(&tmp, &["activity", "--limit", "5"])
         .success()
-        .stdout(contains("[    tool]"))
+        .stdout(contains("[  tool  ]"))
         .stdout(contains("run_pipeline: auth flow query"))
-        .stdout(contains("[    warn]"))
+        .stdout(contains("[  warn  ]"))
         .stdout(contains("dead-end: repeated search"))
         .get_output()
         .stdout

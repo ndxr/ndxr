@@ -558,7 +558,7 @@ fn print_recent_activity(conn: &rusqlite::Connection, limit: usize) -> Result<()
             "warning" => "warn",
             other => other,
         };
-        println!("{time}  [{kind_tag:>8}]  {display}");
+        println!("{time}  [{kind_tag:^8}]  {display}");
     }
 
     Ok(())
@@ -601,7 +601,7 @@ fn cmd_activity_follow(conn: &rusqlite::Connection, initial_limit: usize) -> Res
                 "warning" => "warn",
                 other => other,
             };
-            println!("{time}  [{kind_tag:>8}]  {display}");
+            println!("{time}  [{kind_tag:^8}]  {display}");
             last_seen = created_at;
         }
     }
