@@ -294,8 +294,7 @@ User-facing, compact bullets. Describe what users can **do**, not internals. [Ke
 
 ndxr indexes this codebase and provides you with only the relevant code for each task.
 
-**Before modifying any file**, call `mcp__ndxr__run_pipeline` with a description of your task.
-Do not read files directly unless run_pipeline tells you to.
+**IMPORTANT: You MUST call `mcp__ndxr__run_pipeline` BEFORE reading, modifying, or reasoning about any source file.** Do not use Read, Grep, or Glob to explore the codebase — ndxr returns exactly the context you need. Only read files that ndxr includes in its response.
 
 ### Intent
 
@@ -314,8 +313,8 @@ Example: `mcp__ndxr__run_pipeline({ task: "fix the auth crash", intent: "debug" 
 
 ### Tools
 
-- `mcp__ndxr__run_pipeline` -- use this FIRST for every task (pass intent for best results)
-- `mcp__ndxr__get_context_capsule` -- follow-up context queries (also accepts intent)
+- `mcp__ndxr__run_pipeline` -- call this FIRST for every task (pass intent for best results)
+- `mcp__ndxr__get_context_capsule` -- follow-up context when you need more (also accepts intent)
 - `mcp__ndxr__get_skeleton` -- get file signatures without bodies
 - `mcp__ndxr__get_impact_graph` -- check blast radius before refactoring
 - `mcp__ndxr__search_memory` -- search past session insights
@@ -323,3 +322,4 @@ Example: `mcp__ndxr__run_pipeline({ task: "fix the auth crash", intent: "debug" 
 - `mcp__ndxr__search_logic_flow` -- trace execution paths between symbols
 - `mcp__ndxr__get_session_context` -- review session history
 - `mcp__ndxr__index_status` -- check if index is ready
+- `mcp__ndxr__reindex` -- force full re-index when index is stale (after git checkout, branch switch)
