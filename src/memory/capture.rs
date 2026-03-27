@@ -25,13 +25,13 @@ pub struct ToolCallRecord {
 impl ToolCallRecord {
     /// Returns whether this tool call should generate an auto-capture observation.
     ///
-    /// Excluded tools: `search_memory`, `save_observation`, `index_status`
+    /// Excluded tools: `search_memory`, `save_observation`, `index_status`, `reindex`
     /// (to avoid infinite loops and noise).
     #[must_use]
     pub fn should_capture(&self) -> bool {
         !matches!(
             self.tool_name.as_str(),
-            "search_memory" | "save_observation" | "index_status"
+            "search_memory" | "save_observation" | "index_status" | "reindex"
         )
     }
 
@@ -57,7 +57,10 @@ impl ToolCallRecord {
         }
     }
 
-    /// Generates standard content (~50 tokens) for the L2 detail level.
+    /// Generates searchable content for the L2 detail level.
+    ///
+    /// Includes the full query and longer FQN excerpts so that FTS5 can
+    /// match on meaningful terms across sessions.
     #[must_use]
     pub fn to_content(&self) -> String {
         let mut parts = Vec::new();
@@ -66,7 +69,7 @@ impl ToolCallRecord {
             parts.push(format!("Intent: {intent}"));
         }
         if let Some(query) = &self.query {
-            parts.push(format!("Query: {}", truncate(query, 60)));
+            parts.push(format!("Query: {}", truncate(query, 200)));
         }
         parts.push(format!("Result: {}", self.result_summary));
         if !self.pivot_fqns.is_empty() {
@@ -74,7 +77,7 @@ impl ToolCallRecord {
                 .pivot_fqns
                 .iter()
                 .take(5)
-                .map(|f| truncate(f, 40))
+                .map(|f| truncate(f, 120))
                 .collect();
             parts.push(format!("Pivots: {}", fqns.join(", ")));
         }
@@ -176,5 +179,41 @@ mod tests {
         };
         assert!(record.should_capture());
         assert_eq!(record.to_headline(), "Logic flow: 2 paths found");
+    }
+
+    #[test]
+    fn to_content_includes_full_query_and_long_fqns() {
+        let long_query = "a".repeat(180);
+        let long_fqn = "src/deeply/nested/module.rs::SomeStruct::some_very_long_method_name";
+        let record = ToolCallRecord {
+            tool_name: "run_pipeline".to_owned(),
+            intent: Some("modify".to_owned()),
+            query: Some(long_query.clone()),
+            pivot_fqns: vec![long_fqn.to_owned()],
+            result_summary: "3 pivots".to_owned(),
+        };
+        let content = record.to_content();
+        // Query should not be truncated at 60 chars anymore.
+        assert!(
+            content.contains(&long_query),
+            "content should include the full 180-char query"
+        );
+        // FQN should not be truncated at 40 chars anymore.
+        assert!(
+            content.contains(long_fqn),
+            "content should include the full FQN"
+        );
+    }
+
+    #[test]
+    fn reindex_excluded_from_capture() {
+        let record = ToolCallRecord {
+            tool_name: "reindex".to_owned(),
+            intent: None,
+            query: None,
+            pivot_fqns: vec![],
+            result_summary: String::new(),
+        };
+        assert!(!record.should_capture());
     }
 }

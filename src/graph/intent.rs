@@ -29,9 +29,9 @@ pub struct BoostRule {
     pub description: &'static str,
     /// Boost value to add to the score.
     pub value: f64,
-    /// Condition function: takes (kind, `is_exported`, `has_docstring`, `in_degree`) and
-    /// returns `true` if the boost applies.
-    pub condition: fn(&str, bool, bool, usize) -> bool,
+    /// Condition function: takes (kind, `is_exported`, `has_docstring`, `in_degree`, `file_path`)
+    /// and returns `true` if the boost applies.
+    pub condition: fn(&str, bool, bool, usize, &str) -> bool,
 }
 
 /// Capsule construction hints derived from the detected intent.
@@ -201,13 +201,7 @@ pub fn get_weights(intent: &Intent) -> IntentWeights {
     match intent {
         Intent::Debug => debug_weights(),
         Intent::Refactor => refactor_weights(),
-        Intent::Modify => IntentWeights {
-            w_bm25: 0.40,
-            w_tfidf: 0.35,
-            w_centrality: 0.25,
-            boosts: vec![],
-            capsule_hints: CapsuleHints::default(),
-        },
+        Intent::Modify => modify_weights(),
         Intent::Explore => explore_weights(),
         Intent::Understand => understand_weights(),
         Intent::Test => test_weights(),
@@ -249,7 +243,7 @@ fn debug_weights() -> IntentWeights {
             BoostRule {
                 description: "Symbols with error/exception/panic in name or kind",
                 value: 0.20,
-                condition: |kind, _, _, _| {
+                condition: |kind, _, _, _, _| {
                     let k = kind.to_lowercase();
                     k.contains("error") || k.contains("exception") || k.contains("panic")
                 },
@@ -257,7 +251,7 @@ fn debug_weights() -> IntentWeights {
             BoostRule {
                 description: "Symbols near error-handling paths (high in-degree)",
                 value: 0.10,
-                condition: |_, _, _, in_degree| in_degree >= 3,
+                condition: |_, _, _, in_degree, _| in_degree >= 3,
             },
         ],
         capsule_hints: CapsuleHints {
@@ -265,6 +259,33 @@ fn debug_weights() -> IntentWeights {
             pivot_fraction: 0.85,
             include_skeleton_docs: false,
         },
+    }
+}
+
+/// Weights for [`Intent::Modify`]: balanced, boost registry/entry-point files and extension points.
+fn modify_weights() -> IntentWeights {
+    IntentWeights {
+        w_bm25: 0.40,
+        w_tfidf: 0.35,
+        w_centrality: 0.25,
+        boosts: vec![
+            BoostRule {
+                description: "Registry/entry-point files (mod.rs, index.ts, __init__.py)",
+                value: 0.15,
+                condition: |_, _, _, _, file_path| {
+                    file_path.ends_with("mod.rs")
+                        || file_path.ends_with("index.ts")
+                        || file_path.ends_with("index.js")
+                        || file_path.ends_with("__init__.py")
+                },
+            },
+            BoostRule {
+                description: "Exported symbols with high in-degree (extension points)",
+                value: 0.10,
+                condition: |_, is_exported, _, in_degree, _| is_exported && in_degree >= 5,
+            },
+        ],
+        capsule_hints: CapsuleHints::default(),
     }
 }
 
@@ -278,12 +299,12 @@ fn refactor_weights() -> IntentWeights {
             BoostRule {
                 description: "Exported symbols (public API surface)",
                 value: 0.25,
-                condition: |_, is_exported, _, _| is_exported,
+                condition: |_, is_exported, _, _, _| is_exported,
             },
             BoostRule {
                 description: "High in-degree symbols (many callers)",
                 value: 0.15,
-                condition: |_, _, _, in_degree| in_degree >= 5,
+                condition: |_, _, _, in_degree, _| in_degree >= 5,
             },
         ],
         capsule_hints: CapsuleHints {
@@ -304,12 +325,12 @@ fn explore_weights() -> IntentWeights {
             BoostRule {
                 description: "Symbols with docstrings",
                 value: 0.10,
-                condition: |_, _, has_docstring, _| has_docstring,
+                condition: |_, _, has_docstring, _, _| has_docstring,
             },
             BoostRule {
                 description: "High centrality symbols",
                 value: 0.05,
-                condition: |_, _, _, in_degree| in_degree >= 3,
+                condition: |_, _, _, in_degree, _| in_degree >= 3,
             },
         ],
         capsule_hints: CapsuleHints::default(),
@@ -326,12 +347,12 @@ fn understand_weights() -> IntentWeights {
             BoostRule {
                 description: "Symbols with docstrings",
                 value: 0.20,
-                condition: |_, _, has_docstring, _| has_docstring,
+                condition: |_, _, has_docstring, _, _| has_docstring,
             },
             BoostRule {
                 description: "Module/class/trait/interface symbols",
                 value: 0.15,
-                condition: |kind, _, _, _| {
+                condition: |kind, _, _, _, _| {
                     matches!(
                         kind,
                         "module" | "class" | "trait" | "interface" | "namespace"
@@ -341,7 +362,7 @@ fn understand_weights() -> IntentWeights {
             BoostRule {
                 description: "Entry points (no callers)",
                 value: 0.10,
-                condition: |_, _, _, in_degree| in_degree == 0,
+                condition: |_, _, _, in_degree, _| in_degree == 0,
             },
         ],
         capsule_hints: CapsuleHints {
@@ -362,7 +383,7 @@ fn test_weights() -> IntentWeights {
             BoostRule {
                 description: "Test files (*_test.*, *_spec.*, test_*.*)",
                 value: 0.20,
-                condition: |kind, _, _, _| {
+                condition: |kind, _, _, _, _| {
                     let k = kind.to_lowercase();
                     k.contains("test") || k.contains("spec")
                 },
@@ -370,7 +391,7 @@ fn test_weights() -> IntentWeights {
             BoostRule {
                 description: "Symbols imported by tests (high in-degree)",
                 value: 0.15,
-                condition: |_, _, _, in_degree| in_degree >= 2,
+                condition: |_, _, _, in_degree, _| in_degree >= 2,
             },
         ],
         capsule_hints: CapsuleHints::default(),
@@ -554,6 +575,118 @@ mod tests {
                 "include_skeleton_docs mismatch for {intent:?}"
             );
         }
+    }
+
+    #[test]
+    fn modify_boosts_registry_files() {
+        let w = get_weights(&Intent::Modify);
+        let registry_boost = &w.boosts[0];
+        // Registry files should trigger the boost.
+        assert!((registry_boost.condition)(
+            "function",
+            true,
+            false,
+            0,
+            "src/languages/mod.rs"
+        ));
+        assert!((registry_boost.condition)(
+            "function",
+            false,
+            false,
+            0,
+            "src/index.ts"
+        ));
+        assert!((registry_boost.condition)(
+            "function",
+            false,
+            false,
+            0,
+            "src/index.js"
+        ));
+        assert!((registry_boost.condition)(
+            "class",
+            false,
+            false,
+            0,
+            "pkg/__init__.py"
+        ));
+        // Regular files should NOT trigger the boost.
+        assert!(!(registry_boost.condition)(
+            "function",
+            true,
+            false,
+            0,
+            "src/auth/service.ts"
+        ));
+        assert!(!(registry_boost.condition)(
+            "function",
+            true,
+            false,
+            0,
+            "src/lib.rs"
+        ));
+    }
+
+    #[test]
+    fn modify_boosts_exported_extension_points() {
+        let w = get_weights(&Intent::Modify);
+        let extension_boost = &w.boosts[1];
+        // Exported + high in-degree should trigger.
+        assert!((extension_boost.condition)(
+            "function",
+            true,
+            false,
+            5,
+            "src/lib.rs"
+        ));
+        assert!((extension_boost.condition)(
+            "function",
+            true,
+            false,
+            10,
+            "src/auth.ts"
+        ));
+        // Not exported → no boost.
+        assert!(!(extension_boost.condition)(
+            "function",
+            false,
+            false,
+            5,
+            "src/lib.rs"
+        ));
+        // Low in-degree → no boost.
+        assert!(!(extension_boost.condition)(
+            "function",
+            true,
+            false,
+            4,
+            "src/lib.rs"
+        ));
+    }
+
+    #[test]
+    fn existing_boosts_unaffected_by_file_path_param() {
+        // Debug boosts should work the same regardless of file_path.
+        let w = get_weights(&Intent::Debug);
+        assert!((w.boosts[0].condition)(
+            "error_handler",
+            false,
+            false,
+            0,
+            "any.rs"
+        ));
+        assert!((w.boosts[1].condition)(
+            "function", false, false, 3, "any.rs"
+        ));
+
+        // Refactor boosts.
+        let w = get_weights(&Intent::Refactor);
+        assert!((w.boosts[0].condition)(
+            "function", true, false, 0, "any.rs"
+        ));
+        assert!((w.boosts[1].condition)(
+            "function", false, false, 5, "any.rs"
+        ));
     }
 
     #[test]

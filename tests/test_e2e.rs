@@ -1461,3 +1461,108 @@ fn e2e_schema_version_recorded() {
         .unwrap();
     assert!(migrated_at > 0, "migration timestamp should be positive");
 }
+
+// ===========================================================================
+// E2E: Activity command
+// ===========================================================================
+
+#[test]
+fn e2e_activity_shows_observations() {
+    let tmp = TempDir::new().unwrap();
+    create_typescript_project(&tmp);
+
+    ndxr(&tmp, &["index"]).success();
+
+    // Insert a session and observation directly in DB.
+    let conn = open_db(&tmp);
+    let session_id = ndxr::memory::store::create_session(&conn).unwrap();
+    ndxr::memory::store::save_observation(
+        &conn,
+        &ndxr::memory::store::NewObservation {
+            session_id: session_id.clone(),
+            kind: "auto".into(),
+            content: "run_pipeline called for auth flow".into(),
+            headline: Some("run_pipeline: auth flow query".into()),
+            detail_level: 1,
+            linked_fqns: vec![],
+        },
+    )
+    .unwrap();
+    ndxr::memory::store::save_observation(
+        &conn,
+        &ndxr::memory::store::NewObservation {
+            session_id,
+            kind: "warning".into(),
+            content: "dead-end exploration detected".into(),
+            headline: Some("dead-end: repeated search".into()),
+            detail_level: 1,
+            linked_fqns: vec![],
+        },
+    )
+    .unwrap();
+    drop(conn);
+
+    // Run activity command and verify output.
+    let output = ndxr(&tmp, &["activity", "--limit", "5"])
+        .success()
+        .stdout(contains("[    tool]"))
+        .stdout(contains("run_pipeline: auth flow query"))
+        .stdout(contains("[    warn]"))
+        .stdout(contains("dead-end: repeated search"))
+        .get_output()
+        .stdout
+        .clone();
+
+    // Verify chronological ordering (oldest first): tool observation before warn.
+    let stdout = std::str::from_utf8(&output).unwrap();
+    let tool_pos = stdout
+        .find("run_pipeline: auth flow query")
+        .expect("tool observation should be in output");
+    let warn_pos = stdout
+        .find("dead-end: repeated search")
+        .expect("warn observation should be in output");
+    assert!(
+        tool_pos < warn_pos,
+        "tool observation should appear before warn (chronological order)"
+    );
+}
+
+#[test]
+fn e2e_reindex_does_not_add_symbol_changes() {
+    let tmp = TempDir::new().unwrap();
+    create_typescript_project(&tmp);
+
+    // First index populates symbol_changes via change detection.
+    ndxr(&tmp, &["index"]).success();
+
+    let conn = open_db(&tmp);
+    let changes_before: i64 = conn
+        .query_row("SELECT COUNT(*) FROM symbol_changes", [], |row| row.get(0))
+        .unwrap();
+    drop(conn);
+
+    // Reindex should skip change detection entirely — no new rows added.
+    ndxr(&tmp, &["reindex"]).success();
+
+    let conn = open_db(&tmp);
+    let changes_after: i64 = conn
+        .query_row("SELECT COUNT(*) FROM symbol_changes", [], |row| row.get(0))
+        .unwrap();
+
+    assert_eq!(
+        changes_after, changes_before,
+        "reindex should not add new symbol_changes rows (before={changes_before}, after={changes_after})"
+    );
+}
+
+#[test]
+fn e2e_activity_empty_shows_no_activity() {
+    let tmp = TempDir::new().unwrap();
+    create_typescript_project(&tmp);
+
+    ndxr(&tmp, &["index"]).success();
+
+    ndxr(&tmp, &["activity"])
+        .success()
+        .stdout(contains("No activity recorded yet."));
+}

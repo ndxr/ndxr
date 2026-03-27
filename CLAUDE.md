@@ -57,9 +57,9 @@ CLI (clap)  /  MCP Server (rmcp, stdio)
 
 | Entry Point | What It Does |
 |---|---|
-| `src/main.rs` | CLI dispatch: index, reindex, mcp, setup, status, search, skeleton, upgrade |
+| `src/main.rs` | CLI dispatch: index, reindex, mcp, setup, status, search, skeleton, activity, upgrade |
 | `src/indexer/mod.rs` | `index()` / `reindex()` / `index_paths()` — full indexing pipeline |
-| `src/mcp/server.rs` | MCP server with 9 tools, `CoreEngine`, `run_capsule_pipeline()`, `commit_tool_record()` |
+| `src/mcp/server.rs` | MCP server with 10 tools, `CoreEngine`, `run_capsule_pipeline()`, `commit_tool_record()` |
 | `src/graph/search.rs` | `hybrid_search()` — FTS5 BM25 + TF-IDF + centrality + intent scoring |
 | `src/graph/intent.rs` | `get_capsule_hints()` — intent-specific BFS depth, pivot fraction, skeleton docs |
 | `src/capsule/builder.rs` | `build_capsule()` — token-budgeted context packing with BFS expansion |
@@ -192,6 +192,7 @@ Every `.rs` file follows this top-to-bottom order. **Never mix sections.**
 - `u32_child_count()` / `u32_named_child_count()` → `indexer/symbols.rs` (tree-sitter `u32` ↔ `usize` bridge)
 - `format_relative_time()` → `mcp/server.rs` | `run_all_detectors()` → `memory/antipatterns.rs`
 - `resolve_budget()` / `trim_capsule_to_budget()` / `serialize_capsule()` → `mcp/server.rs`
+- `rebuild_graph_from_db()` → `graph/builder.rs` (used by watcher + MCP reindex tool)
 - `build_ignore_matcher()` → `watcher.rs` | `DEFAULT_IGNORED_DIRS` → `watcher.rs`
 
 ### No Dead Code / No Deferred Work
@@ -246,6 +247,7 @@ Every `.rs` file follows this top-to-bottom order. **Never mix sections.**
 | `save_observation` | **No** | Manual observation persistence |
 | `search_logic_flow` | Yes | Trace execution paths between symbols |
 | `index_status` | **No** | Health check and statistics |
+| `reindex` | **No** | Full re-index + graph rebuild |
 
 ## Gotchas
 
@@ -270,7 +272,7 @@ Every `.rs` file follows this top-to-bottom order. **Never mix sections.**
 - **Edition 2024 `set_var`/`remove_var` are unsafe** — wrap in `unsafe {}` blocks in tests. Consolidate all env-var-mutating assertions into a single test function to avoid parallel test races
 - **Clippy `assigning_clones`** — `field = "literal".to_owned()` denied under pedantic. Use `"literal".clone_into(&mut field)` instead
 - **`diff_files()` marks absent files as deleted** — designed for full workspace diffs. Never call with a partial file list (e.g. from `index_paths`) and use its deletion results, or it will wipe unrelated indexed files
-- **Watcher ignore matcher is built once at startup** — loads `.ndxrignore` + `.gitignore` + default dirs (`target/`, `build/`, `bin/`, `node_modules/`, `.git/`, `dist/`). Changes to ignore files require MCP server restart
+- **Watcher ignore matcher hot-reloads** — rebuilt automatically when `.ndxrignore` or `.gitignore` changes. Default exclusions (`target/`, `build/`, `bin/`, `node_modules/`, `.git/`, `dist/`) always apply
 - **MCP server graph is in-memory only** — built at startup from the DB. External `ndxr index`/`ndxr reindex` updates the DB but not the running server's graph. File watcher rebuilds it; otherwise restart required
 
 ## CI / Makefile Parity

@@ -94,7 +94,7 @@ ndxr parses your codebase into symbols (functions, classes, methods, types) and 
                                                   v
                                      +----------------------------+
                                      |       MCP Server           |
-                                     |    9 tools over stdio      |
+                                     |   10 tools over stdio      |
                                      +----------------------------+
 ```
 
@@ -137,18 +137,20 @@ For a deeper dive into internals, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.m
 | `save_observation` | Persist an insight, decision, or important context to session memory. |
 | `get_session_context` | Review recent session history and observations. |
 | `index_status` | Health check: file, symbol, and edge counts, DB size, index age. |
+| `reindex` | Force a full re-index when the index is stale (after git checkout, branch switch). |
 
 ## CLI Reference
 
 ```bash
-ndxr index [--verbose]              # Incremental index (only changed files)
-ndxr reindex [--verbose]            # Full re-index (preserves session memory)
-ndxr mcp                            # Start MCP server on stdio
-ndxr setup [--scope project|user]   # Configure Claude Code (.mcp.json + CLAUDE.md)
-ndxr status [--json]                # Show index statistics
+ndxr index [--verbose]                # Incremental index (only changed files)
+ndxr reindex [--verbose]              # Full re-index (preserves session memory)
+ndxr mcp                              # Start MCP server on stdio
+ndxr setup [--scope project|user]     # Configure Claude Code (.mcp.json + CLAUDE.md)
+ndxr status [--json]                  # Show index statistics
 ndxr search "query" [-n 10] [--intent debug] [--explain]
 ndxr skeleton src/auth.ts [--docs true|false]
-ndxr upgrade [--check] [--force]    # Check for updates and self-upgrade
+ndxr activity [--limit N] [--follow]  # Show recent MCP tool activity
+ndxr upgrade [--check] [--force]      # Check for updates and self-upgrade
 ```
 
 Run `ndxr <command> --help` for detailed help on any command.
@@ -167,7 +169,7 @@ vendor/
 __fixtures__/
 ```
 
-If `.ndxrignore` is not present, ndxr falls back to `.gitignore`. When both files exist, patterns from both are applied.
+If `.ndxrignore` is not present, ndxr falls back to `.gitignore`. When both files exist, patterns from both are applied. Changes to either file take effect immediately during a session (no restart needed).
 
 The following directories are always excluded (both indexing and file watching):
 

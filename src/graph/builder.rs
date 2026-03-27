@@ -98,6 +98,19 @@ pub fn build_graph(conn: &Connection) -> Result<SymbolGraph> {
     })
 }
 
+/// Rebuilds the symbol graph and computes `PageRank` centrality on a fresh
+/// database connection. Returns `None` if the connection or graph build fails.
+///
+/// Used by both the file watcher (after incremental re-index) and the MCP
+/// `reindex` tool (after full re-index).
+#[must_use]
+pub fn rebuild_graph_from_db(db_path: &std::path::Path) -> Option<SymbolGraph> {
+    let conn = crate::storage::db::open_or_create(db_path).ok()?;
+    let graph = build_graph(&conn).ok()?;
+    let _ = crate::graph::centrality::compute_and_store(&conn, &graph);
+    Some(graph)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

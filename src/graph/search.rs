@@ -147,7 +147,15 @@ pub fn hybrid_search(
             let intent_boost: f64 = weights
                 .boosts
                 .iter()
-                .filter(|b| (b.condition)(&c.kind, c.is_exported, c.has_docstring, c.in_degree))
+                .filter(|b| {
+                    (b.condition)(
+                        &c.kind,
+                        c.is_exported,
+                        c.has_docstring,
+                        c.in_degree,
+                        &c.file_path,
+                    )
+                })
                 .map(|b| b.value)
                 .sum();
 

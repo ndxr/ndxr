@@ -1,4 +1,4 @@
-//! MCP server implementation with 9 tools for AI coding agents.
+//! MCP server implementation with 10 tools for AI coding agents.
 //!
 //! All shared state is held behind `Arc<CoreEngine>` so the server struct
 //! remains `Clone` as required by rmcp. The `rusqlite::Connection` is protected
@@ -844,6 +844,56 @@ impl NdxrServer {
         drop(conn_guard);
 
         to_json_result(&result)
+    }
+
+    /// Force a full re-index of the workspace and rebuild the symbol graph.
+    #[tool(
+        description = "Force a full re-index of the workspace. Clears and rebuilds the entire index \
+                       and symbol graph. Use when the index is stale after a git checkout, branch switch, \
+                       or large external change. Preserves session memory. No auto-capture is performed."
+    )]
+    async fn reindex(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        let engine = self.engine.clone();
+        let result = tokio::task::spawn_blocking(move || indexer::reindex(&engine.config))
+            .await
+            .map_err(|e| {
+                tracing::error!("reindex task panicked: {e}");
+                rmcp::ErrorData::internal_error("reindex failed", None)
+            })?
+            .map_err(|e| {
+                tracing::error!("reindex failed: {e}");
+                rmcp::ErrorData::internal_error("reindex failed", None)
+            })?;
+
+        // Rebuild graph from the freshly populated database.
+        let db_path = self.engine.config.db_path.clone();
+        let graph_result =
+            tokio::task::spawn_blocking(move || graph::builder::rebuild_graph_from_db(&db_path))
+                .await
+                .map_err(|e| {
+                    tracing::error!("graph rebuild panicked: {e}");
+                    rmcp::ErrorData::internal_error("graph rebuild failed", None)
+                })?;
+
+        let graph_rebuilt = if let Some(new_graph) = graph_result {
+            let mut graph_lock = self.engine.graph.write().await;
+            *graph_lock = Some(new_graph);
+            true
+        } else {
+            tracing::warn!("reindex: graph rebuild failed — in-memory graph may be stale");
+            false
+        };
+
+        let stats = serde_json::json!({
+            "files_indexed": result.files_indexed,
+            "symbols_extracted": result.symbols_extracted,
+            "edges_extracted": result.edges_extracted,
+            "duration_ms": result.duration_ms,
+            "observations_marked_stale": result.observations_marked_stale,
+            "graph_rebuilt": graph_rebuilt,
+        });
+
+        to_json_result(&stats)
     }
 }
 

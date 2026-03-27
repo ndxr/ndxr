@@ -39,6 +39,22 @@ pub struct LogicFlowResult {
     pub paths_found: usize,
     /// The discovered execution paths, sorted by hops ascending then centrality descending.
     pub paths: Vec<FlowPath>,
+    /// Symbols that connect source and target indirectly (only populated when `paths_found` == 0).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub bridges: Vec<BridgeSymbol>,
+}
+
+/// A symbol that indirectly connects source and target (shared caller/callee/file).
+#[derive(Debug, Clone, Serialize)]
+pub struct BridgeSymbol {
+    /// Fully-qualified symbol name.
+    pub fqn: String,
+    /// Symbol kind (function, class, etc.).
+    pub kind: String,
+    /// File path containing this symbol.
+    pub file_path: String,
+    /// How this symbol bridges the two: "calls both", "called by both", "shared file".
+    pub relationship: String,
 }
 
 /// A single execution path between two symbols.
@@ -156,12 +172,137 @@ pub fn find_paths(
             .then_with(|| b.centrality_score.total_cmp(&a.centrality_score))
     });
 
+    // 7. If no direct paths found, search for bridge symbols.
+    let bridges = if paths.is_empty() {
+        find_bridge_symbols(conn, graph, *from_node, *to_node)?
+    } else {
+        Vec::new()
+    };
+
     Ok(LogicFlowResult {
         from: from_fqn.to_owned(),
         to: to_fqn.to_owned(),
         paths_found: paths.len(),
         paths,
+        bridges,
     })
+}
+
+/// Finds symbols that indirectly connect source and target via shared neighbors.
+///
+/// Does a 1-hop BFS from both source and target (both incoming and outgoing
+/// directions), then finds nodes that appear in both neighborhoods. Limited
+/// to 5 results to keep the response compact.
+fn find_bridge_symbols(
+    conn: &Connection,
+    graph: &SymbolGraph,
+    source_node: NodeIndex,
+    target_node: NodeIndex,
+) -> Result<Vec<BridgeSymbol>> {
+    // Collect 1-hop neighbors of source.
+    let source_out: HashSet<NodeIndex> = graph
+        .graph
+        .neighbors_directed(source_node, Direction::Outgoing)
+        .collect();
+    let source_in: HashSet<NodeIndex> = graph
+        .graph
+        .neighbors_directed(source_node, Direction::Incoming)
+        .collect();
+
+    // Collect 1-hop neighbors of target.
+    let target_out: HashSet<NodeIndex> = graph
+        .graph
+        .neighbors_directed(target_node, Direction::Outgoing)
+        .collect();
+    let target_in: HashSet<NodeIndex> = graph
+        .graph
+        .neighbors_directed(target_node, Direction::Incoming)
+        .collect();
+
+    // Find shared neighbors with classified relationships.
+    let mut bridge_ids: Vec<(i64, &str)> = Vec::new();
+
+    // Nodes called by both source and target ("called by both").
+    for node in source_out.intersection(&target_out) {
+        if let Some(&id) = graph.node_to_id.get(node) {
+            bridge_ids.push((id, "called by both"));
+        }
+    }
+
+    // Nodes that call both source and target ("calls both").
+    for node in source_in.intersection(&target_in) {
+        if let Some(&id) = graph.node_to_id.get(node) {
+            bridge_ids.push((id, "calls both"));
+        }
+    }
+
+    // Deduplicate by id and cap at 5.
+    bridge_ids.sort_by_key(|(id, _)| *id);
+    bridge_ids.dedup_by_key(|(id, _)| *id);
+    bridge_ids.truncate(5);
+
+    if bridge_ids.is_empty() {
+        // Fall back to shared-file: symbols in the same file as source/target.
+        let src_db_id = graph.node_to_id.get(&source_node).copied().unwrap_or(0);
+        let tgt_db_id = graph.node_to_id.get(&target_node).copied().unwrap_or(0);
+
+        let shared: Vec<(i64, String, String, String)> = conn
+            .prepare(
+                "SELECT s.id, s.fqn, s.kind, f.path FROM symbols s \
+                 JOIN files f ON s.file_id = f.id \
+                 WHERE f.id IN ( \
+                     SELECT file_id FROM symbols WHERE id = ?1 \
+                     INTERSECT \
+                     SELECT file_id FROM symbols WHERE id = ?2 \
+                 ) AND s.id NOT IN (?1, ?2) \
+                 LIMIT 5",
+            )
+            .context("prepare shared-file bridge query")?
+            .query_map(rusqlite::params![src_db_id, tgt_db_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .context("query shared-file bridges")?
+            .filter_map(|r| match r {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    tracing::warn!("skipping corrupt bridge row: {e}");
+                    None
+                }
+            })
+            .collect();
+
+        return Ok(shared
+            .into_iter()
+            .map(|(_, fqn, kind, file_path)| BridgeSymbol {
+                fqn,
+                kind,
+                file_path,
+                relationship: "shared file".to_owned(),
+            })
+            .collect());
+    }
+
+    // Load metadata for bridge symbols.
+    let all_ids: Vec<i64> = bridge_ids.iter().map(|(id, _)| *id).collect();
+    let metadata = batch_load_flow_metadata(conn, &all_ids)?;
+
+    Ok(bridge_ids
+        .into_iter()
+        .filter_map(|(id, relationship)| {
+            let (fqn, kind, file_path, _) = metadata.get(&id)?;
+            Some(BridgeSymbol {
+                fqn: fqn.clone(),
+                kind: kind.clone(),
+                file_path: file_path.clone(),
+                relationship: relationship.to_owned(),
+            })
+        })
+        .collect())
 }
 
 /// Resolves a symbol identifier to its database ID.
@@ -576,5 +717,115 @@ mod tests {
         let result = super::find_paths(&conn, &graph, "anything", "anything", None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("same"));
+    }
+
+    #[test]
+    fn bridge_symbols_found_for_disconnected_nodes() {
+        // Build graph: A -> C, B -> C (C is called by both A and B).
+        let mut g = DiGraph::new();
+        let a = g.add_node(1_i64);
+        let b = g.add_node(2_i64);
+        let c = g.add_node(3_i64);
+        g.add_edge(a, c, "calls".to_owned());
+        g.add_edge(b, c, "calls".to_owned());
+        // No edge A->B or B->A.
+
+        let sg = SymbolGraph {
+            graph: g,
+            id_to_node: [(1, a), (2, b), (3, c)].into_iter().collect(),
+            node_to_id: [(a, 1), (b, 2), (c, 3)].into_iter().collect(),
+        };
+
+        let (_tmp, conn) = test_db();
+        conn.execute_batch(
+            "INSERT INTO files (path, language, blake3_hash, line_count, byte_size, indexed_at)
+             VALUES ('test.ts', 'typescript', 'abc', 10, 100, 1000);",
+        )
+        .unwrap();
+        let file_id = conn.last_insert_rowid();
+        for (id, name, fqn) in [
+            (1, "a", "test::a"),
+            (2, "b", "test::b"),
+            (3, "c", "test::c"),
+        ] {
+            conn.execute(
+                "INSERT INTO symbols (id, file_id, name, kind, fqn, start_line, end_line, is_exported)
+                 VALUES (?1, ?2, ?3, 'function', ?4, 1, 5, 1)",
+                rusqlite::params![id, file_id, name, fqn],
+            )
+            .unwrap();
+        }
+
+        let bridges = find_bridge_symbols(&conn, &sg, a, b).unwrap();
+        assert!(!bridges.is_empty(), "should find bridge symbol C");
+        assert_eq!(bridges[0].fqn, "test::c");
+        assert_eq!(bridges[0].relationship, "called by both");
+    }
+
+    #[test]
+    fn bridge_symbols_empty_for_completely_disconnected() {
+        // Build graph: A and B with no shared neighbors.
+        let mut g = DiGraph::new();
+        let a = g.add_node(1_i64);
+        let b = g.add_node(2_i64);
+
+        let sg = SymbolGraph {
+            graph: g,
+            id_to_node: [(1, a), (2, b)].into_iter().collect(),
+            node_to_id: [(a, 1), (b, 2)].into_iter().collect(),
+        };
+
+        let (_tmp, conn) = test_db();
+        // Insert symbols in DIFFERENT files so shared-file fallback doesn't trigger.
+        conn.execute_batch(
+            "INSERT INTO files (id, path, language, blake3_hash, line_count, byte_size, indexed_at)
+             VALUES (1, 'a.ts', 'typescript', 'abc', 10, 100, 1000);
+             INSERT INTO files (id, path, language, blake3_hash, line_count, byte_size, indexed_at)
+             VALUES (2, 'b.ts', 'typescript', 'def', 10, 100, 1000);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO symbols (id, file_id, name, kind, fqn, start_line, end_line, is_exported)
+             VALUES (1, 1, 'a', 'function', 'a::a', 1, 5, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO symbols (id, file_id, name, kind, fqn, start_line, end_line, is_exported)
+             VALUES (2, 2, 'b', 'function', 'b::b', 1, 5, 1)",
+            [],
+        )
+        .unwrap();
+
+        let bridges = find_bridge_symbols(&conn, &sg, a, b).unwrap();
+        assert!(
+            bridges.is_empty(),
+            "should find no bridges between completely disconnected symbols"
+        );
+    }
+
+    #[test]
+    fn bridges_empty_when_direct_paths_exist() {
+        let (_tmp, conn) = test_db();
+        let (sym1, sym2) = insert_test_symbols(&conn);
+
+        // Build connected graph: sym1 -> sym2.
+        let mut g = DiGraph::new();
+        let n1 = g.add_node(sym1);
+        let n2 = g.add_node(sym2);
+        g.add_edge(n1, n2, "calls".to_owned());
+
+        let sg = SymbolGraph {
+            graph: g,
+            id_to_node: [(sym1, n1), (sym2, n2)].into_iter().collect(),
+            node_to_id: [(n1, sym1), (n2, sym2)].into_iter().collect(),
+        };
+
+        let result = find_paths(&conn, &sg, "test::foo", "test::bar", None).unwrap();
+        assert!(result.paths_found > 0, "should find direct paths");
+        assert!(
+            result.bridges.is_empty(),
+            "bridges should be empty when paths exist"
+        );
     }
 }

@@ -72,6 +72,15 @@ pub struct IndexStats {
 /// Returns an error if the database cannot be opened, the filesystem walk
 /// fails, or the database write fails.
 pub fn index(config: &NdxrConfig) -> Result<IndexStats> {
+    index_inner(config, false)
+}
+
+/// Shared implementation for [`index`] and [`reindex`].
+///
+/// When `skip_changes` is `true`, the change detection pipeline (snapshot,
+/// diff, store, staleness) is skipped entirely. This avoids the noise of
+/// marking every symbol as "added" after a full `reset_code_tables()`.
+fn index_inner(config: &NdxrConfig, skip_changes: bool) -> Result<IndexStats> {
     let start = std::time::Instant::now();
     let mut stats = IndexStats::default();
 
@@ -137,17 +146,23 @@ pub fn index(config: &NdxrConfig) -> Result<IndexStats> {
     stats.files_indexed = results.len();
 
     // 5b. Snapshot existing symbol signatures/body hashes before the write
-    //     transaction so we can detect what changed.
-    let fqn_set: std::collections::HashSet<&str> = results
-        .iter()
-        .flat_map(|r| r.symbols.iter().map(|s| s.fqn.as_str()))
-        .collect();
-    let fqns: Vec<&str> = fqn_set.into_iter().collect();
-    let deleted_paths: Vec<String> = deleted
-        .iter()
-        .map(|p| crate::util::normalize_path(p))
-        .collect();
-    let pre_index_symbols = memory::changes::snapshot_symbol_state(&conn, &fqns, &deleted_paths)?;
+    //     transaction so we can detect what changed. Skipped during reindex
+    //     because reset_code_tables() clears all symbols, making every symbol
+    //     appear as "added" (useless noise).
+    let pre_index_symbols = if skip_changes {
+        HashMap::new()
+    } else {
+        let fqn_set: std::collections::HashSet<&str> = results
+            .iter()
+            .flat_map(|r| r.symbols.iter().map(|s| s.fqn.as_str()))
+            .collect();
+        let fqns: Vec<&str> = fqn_set.into_iter().collect();
+        let deleted_paths: Vec<String> = deleted
+            .iter()
+            .map(|p| crate::util::normalize_path(p))
+            .collect();
+        memory::changes::snapshot_symbol_state(&conn, &fqns, &deleted_paths)?
+    };
 
     // 6. Write to DB in a single transaction.
     write_index_results(&conn, &results, &deleted, &diff, &mut stats)?;
@@ -163,22 +178,24 @@ pub fn index(config: &NdxrConfig) -> Result<IndexStats> {
     );
 
     // 8. Detect observation staleness for changed symbols.
-    let reindexed_paths: Vec<String> = results
-        .iter()
-        .map(|r| crate::util::normalize_path(&r.path))
-        .collect();
-    let symbol_diffs =
-        memory::changes::detect_symbol_diffs(&conn, &pre_index_symbols, &reindexed_paths)?;
-    if !symbol_diffs.is_empty() {
-        memory::changes::store_symbol_changes(&conn, &symbol_diffs, None)?;
-        let marked = memory::staleness::detect_staleness(&conn, &symbol_diffs)?;
-        stats.observations_marked_stale = marked;
-        if marked > 0 {
-            info!(
-                marked,
-                changed = symbol_diffs.len(),
-                "observations marked stale"
-            );
+    if !skip_changes {
+        let reindexed_paths: Vec<String> = results
+            .iter()
+            .map(|r| crate::util::normalize_path(&r.path))
+            .collect();
+        let symbol_diffs =
+            memory::changes::detect_symbol_diffs(&conn, &pre_index_symbols, &reindexed_paths)?;
+        if !symbol_diffs.is_empty() {
+            memory::changes::store_symbol_changes(&conn, &symbol_diffs, None)?;
+            let marked = memory::staleness::detect_staleness(&conn, &symbol_diffs)?;
+            stats.observations_marked_stale = marked;
+            if marked > 0 {
+                info!(
+                    marked,
+                    changed = symbol_diffs.len(),
+                    "observations marked stale"
+                );
+            }
         }
     }
 
@@ -324,7 +341,7 @@ pub fn reindex(config: &NdxrConfig) -> Result<IndexStats> {
     let conn = storage::db::open_or_create(&config.db_path)?;
     storage::db::reset_code_tables(&conn)?;
     drop(conn);
-    index(config)
+    index_inner(config, true)
 }
 
 /// Writes parse results and deletions to the database in a single transaction.

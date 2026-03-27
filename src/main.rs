@@ -1,7 +1,7 @@
 //! ndxr CLI entry point.
 //!
 //! Provides subcommands for indexing, searching, serving MCP, project setup,
-//! status inspection, file skeleton rendering, and self-upgrade.
+//! status inspection, file skeleton rendering, activity monitoring, and self-upgrade.
 
 use std::path::{Path, PathBuf};
 
@@ -135,6 +135,25 @@ enum Commands {
         docs: bool,
     },
 
+    /// Show recent MCP tool activity.
+    #[command(
+        long_about = "Show recent MCP tool activity from the current session.\n\n\
+                       Displays auto-captured observations showing which tools Claude Code\n\
+                       has called, with timestamps and result summaries.",
+        after_help = "EXAMPLES:\n\
+                      \x20 ndxr activity            # Last 20 observations\n\
+                      \x20 ndxr activity --limit 50 # Last 50\n\
+                      \x20 ndxr activity --follow   # Live tail (watch mode)"
+    )]
+    Activity {
+        /// Maximum number of entries to show.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Continuously watch for new activity (like tail -f).
+        #[arg(long, short, default_value_t = false)]
+        follow: bool,
+    },
+
     /// Upgrade ndxr to the latest release.
     #[command(
         long_about = "Upgrade ndxr to the latest release.\n\n\
@@ -173,6 +192,7 @@ fn main() -> Result<()> {
             explain,
         }) => cmd_search(&query, limit, intent.as_deref(), explain),
         Some(Commands::Skeleton { files, docs }) => cmd_skeleton(&files, docs),
+        Some(Commands::Activity { limit, follow }) => cmd_activity(limit, follow),
         Some(Commands::Upgrade { check, force }) => {
             if cmd_upgrade(check, force)? {
                 std::process::exit(1);
@@ -488,6 +508,103 @@ fn cleanup_temp_binary(path: &Path) {
     }
 }
 
+/// Show recent MCP tool activity.
+fn cmd_activity(limit: usize, follow: bool) -> Result<()> {
+    let root = find_root()?;
+    let config = ndxr::config::NdxrConfig::from_workspace(root);
+    let conn = ndxr::storage::db::open_or_create(&config.db_path)?;
+
+    if follow {
+        return cmd_activity_follow(&conn, limit);
+    }
+
+    print_recent_activity(&conn, limit)
+}
+
+fn print_recent_activity(conn: &rusqlite::Connection, limit: usize) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT kind, headline, content, datetime(created_at, 'unixepoch', 'localtime') as time \
+         FROM observations ORDER BY created_at DESC, id DESC LIMIT ?1",
+    )?;
+
+    #[allow(clippy::cast_possible_wrap)] // small display limit fits in i64
+    let rows = stmt.query_map([limit as i64], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+
+    let mut entries = Vec::new();
+    for row in rows {
+        let (kind, headline, content, time) = row?;
+        entries.push((kind, headline, content, time));
+    }
+    entries.reverse(); // chronological order
+
+    if entries.is_empty() {
+        println!("No activity recorded yet.");
+        return Ok(());
+    }
+
+    for (kind, headline, content, time) in &entries {
+        let display = headline.as_deref().unwrap_or(content.as_str());
+        let kind_tag = match kind.as_str() {
+            "auto" => "tool",
+            "warning" => "warn",
+            other => other,
+        };
+        println!("{time}  [{kind_tag:>8}]  {display}");
+    }
+
+    Ok(())
+}
+
+fn cmd_activity_follow(conn: &rusqlite::Connection, initial_limit: usize) -> Result<()> {
+    print_recent_activity(conn, initial_limit)?;
+
+    let mut last_seen: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(created_at), 0) FROM observations",
+        [],
+        |row| row.get(0),
+    )?;
+
+    println!("\n--- watching for new activity (Ctrl+C to stop) ---\n");
+
+    let mut stmt = conn.prepare(
+        "SELECT kind, headline, content, datetime(created_at, 'unixepoch', 'localtime'), created_at \
+         FROM observations WHERE created_at > ?1 ORDER BY created_at ASC, id ASC",
+    )?;
+
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+
+        let rows = stmt.query_map([last_seen], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })?;
+
+        for row in rows {
+            let (kind, headline, content, time, created_at) = row?;
+            let display = headline.as_deref().unwrap_or(content.as_str());
+            let kind_tag = match kind.as_str() {
+                "auto" => "tool",
+                "warning" => "warn",
+                other => other,
+            };
+            println!("{time}  [{kind_tag:>8}]  {display}");
+            last_seen = created_at;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Setup helpers
 // ---------------------------------------------------------------------------
@@ -594,7 +711,8 @@ Example: `mcp__ndxr__run_pipeline({ task: \"fix the auth crash\", intent: \"debu
 - `mcp__ndxr__save_observation` -- save important decisions or insights
 - `mcp__ndxr__search_logic_flow` -- trace execution paths between symbols
 - `mcp__ndxr__get_session_context` -- review session history
-- `mcp__ndxr__index_status` -- check if index is ready";
+- `mcp__ndxr__index_status` -- check if index is ready
+- `mcp__ndxr__reindex` -- force full re-index when index is stale (after git checkout, branch switch)";
 
 /// Section header used to locate the ndxr section in CLAUDE.md.
 const SECTION_HEADER: &str = "## ndxr context engine";
@@ -722,6 +840,7 @@ fn print_quick_start() {
     println!("  status     Show index statistics");
     println!("  search     Search the index");
     println!("  skeleton   Show file skeletons (signatures only)");
+    println!("  activity   Show recent MCP tool activity");
     println!("  upgrade    Upgrade to the latest release");
     println!();
     println!("QUICK START:");

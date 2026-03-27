@@ -7,7 +7,6 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::graph::builder::SymbolGraph;
 use crate::languages;
 use crate::mcp::server::CoreEngine;
 use anyhow::Result;
@@ -62,7 +61,7 @@ impl FileWatcher {
 
         // Spawn debounce + re-index task.
         let ws_root = workspace_root.clone();
-        let ignore_matcher = build_ignore_matcher(&ws_root);
+        let mut ignore_matcher = build_ignore_matcher(&ws_root);
         tokio::spawn(async move {
             let mut pending: HashSet<PathBuf> = HashSet::new();
             let mut debounce_deadline: Option<tokio::time::Instant> = None;
@@ -71,6 +70,16 @@ impl FileWatcher {
                 tokio::select! {
                     _ = &mut shutdown_rx => break,
                     Some(event) = event_rx.recv() => {
+                        // Hot-reload ignore matcher when .ndxrignore or .gitignore change.
+                        let ignore_changed = event.paths.iter().any(|p| {
+                            p.file_name()
+                                .is_some_and(|n| n == ".ndxrignore" || n == ".gitignore")
+                        });
+                        if ignore_changed {
+                            ignore_matcher = build_ignore_matcher(&ws_root);
+                            tracing::info!("watcher: reloaded ignore patterns");
+                        }
+
                         for path in event.paths {
                             if should_process_path(&ws_root, &path, &ignore_matcher) {
                                 pending.insert(path);
@@ -116,7 +125,7 @@ impl FileWatcher {
                                     return None;
                                 }
                             }
-                            rebuild_graph(&engine_clone.config.db_path)
+                            crate::graph::builder::rebuild_graph_from_db(&engine_clone.config.db_path)
                         }).await;
 
                         match graph_result {
@@ -214,15 +223,6 @@ fn run_antipattern_detectors(db_path: &Path) {
         };
         let _ = crate::memory::store::save_observation(&conn, &obs);
     }
-}
-
-/// Rebuilds the symbol graph and computes `PageRank` centrality on a fresh
-/// database connection. Returns `None` if the connection or graph build fails.
-fn rebuild_graph(db_path: &Path) -> Option<SymbolGraph> {
-    let conn = crate::storage::db::open_or_create(db_path).ok()?;
-    let graph = crate::graph::builder::build_graph(&conn).ok()?;
-    let _ = crate::graph::centrality::compute_and_store(&conn, &graph);
-    Some(graph)
 }
 
 /// Default directories always excluded from the file watcher.
@@ -481,6 +481,49 @@ mod tests {
         fs::create_dir_all(file.parent().unwrap()).unwrap();
         fs::write(&file, "fn y() {}").unwrap();
         assert!(should_process_path(root, &file, &matcher));
+    }
+
+    #[test]
+    fn hot_reload_ndxrignore_rejects_newly_ignored_path() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        // Create a source file.
+        let file = root.join("generated").join("output.rs");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "fn gen() {}").unwrap();
+
+        // Initially no .ndxrignore — file should pass.
+        let matcher = build_ignore_matcher(root);
+        assert!(should_process_path(root, &file, &matcher));
+
+        // Create .ndxrignore that excludes generated/.
+        fs::write(root.join(".ndxrignore"), "generated/\n").unwrap();
+
+        // Rebuild matcher — file should now be rejected.
+        let matcher = build_ignore_matcher(root);
+        assert!(!should_process_path(root, &file, &matcher));
+    }
+
+    #[test]
+    fn hot_reload_gitignore_rejects_newly_ignored_path() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        let file = root.join("logs").join("app.rs");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "fn log() {}").unwrap();
+
+        // Initially no .gitignore — file should pass.
+        let matcher = build_ignore_matcher(root);
+        assert!(should_process_path(root, &file, &matcher));
+
+        // Create .gitignore that excludes logs/.
+        fs::write(root.join(".gitignore"), "logs/\n").unwrap();
+
+        // Rebuild matcher — file should now be rejected.
+        let matcher = build_ignore_matcher(root);
+        assert!(!should_process_path(root, &file, &matcher));
     }
 
     #[test]
