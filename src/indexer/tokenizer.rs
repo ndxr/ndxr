@@ -4,7 +4,7 @@
 //! component splitting with stop-word removal. Used to build term-frequency
 //! vectors for symbol search ranking.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Stop words to filter from tokenized output.
 const STOP_WORDS: &[&str] = &[
@@ -322,6 +322,62 @@ pub fn build_fts_query(raw: &str) -> String {
         .join(" OR ")
 }
 
+/// Extracts character trigrams from a string.
+///
+/// Returns an empty set for strings shorter than 3 characters.
+/// Input is lowercased before extraction.
+fn extract_trigrams(s: &str) -> HashSet<String> {
+    let lower = s.to_lowercase();
+    let chars: Vec<char> = lower.chars().collect();
+    if chars.len() < 3 {
+        return HashSet::new();
+    }
+    let mut trigrams = HashSet::with_capacity(chars.len() - 2);
+    for window in chars.windows(3) {
+        trigrams.insert(window.iter().collect());
+    }
+    trigrams
+}
+
+/// Extracts trigrams from an identifier by splitting into parts first.
+///
+/// Splits `camelCase`/`snake_case` via `tokenize_identifier`, extracts trigrams
+/// from each part, and unions them with trigrams of the raw lowercased string.
+fn identifier_trigrams(s: &str) -> HashSet<String> {
+    let parts = tokenize_identifier(s);
+    let mut all_trigrams = HashSet::new();
+    for part in &parts {
+        all_trigrams.extend(extract_trigrams(part));
+    }
+    all_trigrams.extend(extract_trigrams(s));
+    all_trigrams
+}
+
+/// Computes trigram Jaccard similarity between two identifier strings.
+///
+/// Both strings are split into `camelCase`/`snake_case` parts, trigrams are
+/// extracted from each part, and the union of all trigrams is used for
+/// Jaccard computation: `|intersection| / |union|`.
+///
+/// Returns a value in \[0.0, 1.0\]. Returns 0.0 if either string produces
+/// no trigrams (e.g., strings shorter than 3 characters).
+#[must_use]
+pub fn trigram_similarity(a: &str, b: &str) -> f64 {
+    let trigrams_a = identifier_trigrams(a);
+    let trigrams_b = identifier_trigrams(b);
+    if trigrams_a.is_empty() || trigrams_b.is_empty() {
+        return 0.0;
+    }
+    let intersection = trigrams_a.intersection(&trigrams_b).count();
+    let union = trigrams_a.union(&trigrams_b).count();
+    if union == 0 {
+        return 0.0;
+    }
+    #[allow(clippy::cast_precision_loss)] // set sizes are small
+    let result = intersection as f64 / union as f64;
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,5 +478,56 @@ mod tests {
                 window[1]
             );
         }
+    }
+
+    #[test]
+    fn trigram_similarity_identical() {
+        assert!((trigram_similarity("auth", "auth") - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn trigram_similarity_prefix_match() {
+        let sim = trigram_similarity("auth", "authenticate");
+        assert!(
+            sim > 0.0,
+            "prefix should have non-zero similarity, got {sim}"
+        );
+        assert!(sim < 1.0, "prefix should not be identical, got {sim}");
+    }
+
+    #[test]
+    fn trigram_similarity_no_overlap() {
+        assert!(
+            trigram_similarity("xyz", "authenticate").abs() < f64::EPSILON,
+            "no shared trigrams should give zero similarity"
+        );
+    }
+
+    #[test]
+    fn trigram_similarity_short_strings() {
+        assert!(
+            trigram_similarity("ab", "authenticate").abs() < f64::EPSILON,
+            "strings shorter than 3 chars produce no trigrams"
+        );
+    }
+
+    #[test]
+    fn trigram_similarity_case_insensitive() {
+        assert!(
+            (trigram_similarity("Auth", "auth") - 1.0).abs() < f64::EPSILON,
+            "should be case-insensitive"
+        );
+    }
+
+    #[test]
+    fn trigram_similarity_snake_case_split() {
+        let sim = trigram_similarity("validate", "validate_token");
+        assert!(sim > 0.3, "snake_case parts should match, got {sim}");
+    }
+
+    #[test]
+    fn trigram_similarity_camel_case_split() {
+        let sim = trigram_similarity("auth", "AuthService");
+        assert!(sim > 0.2, "camelCase parts should match, got {sim}");
     }
 }

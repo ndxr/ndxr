@@ -606,6 +606,8 @@ mod tests {
                 bm25: 0.5,
                 tfidf: 0.5,
                 centrality: 0.5,
+                ngram: 0.0,
+                semantic: 0.0,
                 intent_boost: 0.0,
                 intent: "explore".to_string(),
                 matched_terms: vec![],

@@ -11,7 +11,7 @@ ndxr solves a specific problem: AI coding agents waste context windows reading i
 - **Single binary** — no daemon, no server to manage. The MCP server runs as a child process of the AI tool.
 - **SQLite as the only store** — code index, FTS5 search, memory system, and graph metadata all live in one `.ndxr/index.db` file. WAL mode enables concurrent reads during writes.
 - **tree-sitter for parsing** — fast, incremental, language-agnostic AST extraction. Each language module defines tree-sitter queries for what constitutes a symbol, an import, and a call.
-- **Structural ranking over text search** — BM25 finds candidates, but PageRank centrality and intent-aware weighting determine final ranking. A utility function called by 50 other functions ranks higher than one with the same name match.
+- **Structural ranking over text search** — BM25 finds candidates, but PageRank centrality, n-gram similarity, optional semantic embeddings, and intent-aware weighting determine final ranking. A utility function called by 50 other functions ranks higher than one with the same name match.
 
 ## System Architecture
 
@@ -28,11 +28,11 @@ ndxr solves a specific problem: AI coding agents waste context windows reading i
                     CoreEngine (Arc)
                     Mutex<Connection>  +  RwLock<SymbolGraph>
                           |
-        +---------+-------+-------+---------+
-        |         |               |         |
-     Indexer    Graph          Memory    Watcher
-     parse &    search &       capture   fs events
-     store      rank           & recall  debounce
+        +---------+-------+-------+---------+-----------+
+        |         |               |         |           |
+     Indexer    Graph          Memory    Watcher    Embeddings
+     parse &    search &       capture   fs events  ONNX model
+     store      rank           & recall  debounce   (optional)
         |         |              |         |
         |    +----+----+         |         |
         |    |         |         |         |
@@ -58,7 +58,7 @@ ndxr solves a specific problem: AI coding agents waste context windows reading i
 The indexer transforms source files into a queryable representation:
 
 ```
-source files → tree-sitter AST → symbols + edges → SQLite + FTS5 → PageRank
+source files → tree-sitter AST → symbols + edges → SQLite + FTS5 → PageRank → embeddings (optional)
 ```
 
 **Key design choices in the indexer:**
@@ -75,17 +75,19 @@ Edges from the AST reference targets by name only. The edge resolver maps names 
 
 ### Search
 
-Search combines three orthogonal signals to rank symbols:
+Search combines five orthogonal signals to rank symbols:
 
 ```
-query → FTS5 candidates (BM25) → enrich with TF-IDF + centrality → intent-weighted hybrid score
+query → FTS5 candidates (BM25) → enrich with TF-IDF + centrality + n-gram + semantic → intent-weighted hybrid score
 ```
 
-**Why three signals?**
+**Why five signals?**
 
 - **BM25** (full-text relevance) — finds symbols whose names, FQNs, signatures, or docstrings match the query terms. Good at "find me the function named X."
 - **TF-IDF cosine similarity** — measures semantic overlap between the query and the symbol's term frequency vector. Good at "find code related to authentication" even if the exact word doesn't appear.
 - **PageRank centrality** — structural importance in the dependency graph. A function called by many others is more likely to be relevant for refactoring or understanding.
+- **Character n-gram similarity** — trigram Jaccard similarity between the query and symbol names. Handles partial/subword matches: "auth" boosts "authenticate" and "AuthService". Always active.
+- **Semantic embedding similarity** — cosine similarity between query and symbol embedding vectors (384-d, all-MiniLM-L6-v2). Bridges vocabulary gaps: "verify credentials" finds `authenticateUser`. Optional — requires `ndxr model download` (~23 MiB). When the model is absent, semantic weight is zero and the other four signals are redistributed.
 
 **Intent detection** adjusts the weights between these signals. A "fix the auth bug" query (intent: Debug) weights BM25 heavily (find the exact error). A "refactor the auth system" query (intent: Refactor) weights centrality heavily (find high-impact symbols). Intent can be auto-detected from the query or explicitly passed via the `intent` parameter on `run_pipeline` and `get_context_capsule`. See `graph/intent.rs` for the keyword lists, weight tables, and `CapsuleHints`.
 

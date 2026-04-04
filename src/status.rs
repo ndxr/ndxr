@@ -29,6 +29,10 @@ pub struct IndexStatus {
     pub newest_indexed_at: Option<i64>,
     /// Database file size in bytes.
     pub db_size_bytes: u64,
+    /// Number of symbols with stored embeddings.
+    pub embeddings_count: i64,
+    /// Name of the embedding model used, if any.
+    pub embeddings_model: Option<String>,
 }
 
 /// Collects index health statistics from the database.
@@ -67,6 +71,21 @@ pub fn collect_index_status(conn: &Connection, db_path: &Path) -> Result<IndexSt
         .with_context(|| format!("cannot read database metadata: {}", db_path.display()))?
         .len();
 
+    let embeddings_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM symbol_embeddings", [], |row| {
+            row.get(0)
+        })
+        .context("failed to count embeddings")?;
+    let embeddings_model: Option<String> = match conn.query_row(
+        "SELECT DISTINCT model_name FROM symbol_embeddings LIMIT 1",
+        [],
+        |row| row.get::<_, String>(0),
+    ) {
+        Ok(name) => Some(name),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(e) => return Err(e).context("failed to query embedding model name"),
+    };
+
     Ok(IndexStatus {
         file_count,
         symbol_count,
@@ -76,5 +95,7 @@ pub fn collect_index_status(conn: &Connection, db_path: &Path) -> Result<IndexSt
         oldest_indexed_at,
         newest_indexed_at,
         db_size_bytes,
+        embeddings_count,
+        embeddings_model,
     })
 }

@@ -184,6 +184,7 @@ fn search_produces_results() {
         "validateToken",
         10,
         Some(Intent::Explore),
+        None,
     )
     .unwrap();
     let results = outcome.results;
@@ -209,9 +210,15 @@ fn capsule_has_pivots() {
     centrality::compute_and_store(&conn, &graph).unwrap();
 
     let intent = Intent::Explore;
-    let outcome =
-        relaxation::search_with_relaxation(&conn, &graph, "AuthService login", 10, Some(intent))
-            .unwrap();
+    let outcome = relaxation::search_with_relaxation(
+        &conn,
+        &graph,
+        "AuthService login",
+        10,
+        Some(intent),
+        None,
+    )
+    .unwrap();
     let results = outcome.results;
 
     let estimator = TokenEstimator::default();
@@ -309,6 +316,7 @@ fn impact_hints_for_symbols() {
         "validateToken",
         5,
         Some(Intent::Explore),
+        None,
     )
     .unwrap();
     let results = outcome.results;
@@ -418,6 +426,7 @@ async fn ndxr_server_can_be_constructed() {
         config,
         conn: Mutex::new(conn),
         graph: RwLock::new(Some(graph)),
+        embeddings_model: None,
     });
 
     let server = NdxrServer::new(engine, session_id);

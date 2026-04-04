@@ -22,7 +22,7 @@ fn search_unicode_query_does_not_crash() {
         "\u{0410}\u{0411}\u{0412}\u{0413}",
     ];
     for query in &unicode_queries {
-        let result = ndxr::graph::search::hybrid_search(&conn, &graph, query, 5, None);
+        let result = ndxr::graph::search::hybrid_search(&conn, &graph, query, 5, None, None);
         assert!(
             result.is_ok(),
             "search should not crash for Unicode query: {query}"
@@ -42,7 +42,7 @@ fn search_very_long_query() {
         "query should be at least 10,000 chars"
     );
 
-    let result = ndxr::graph::search::hybrid_search(&conn, &graph, &long_query, 5, None);
+    let result = ndxr::graph::search::hybrid_search(&conn, &graph, &long_query, 5, None, None);
     assert!(
         result.is_ok(),
         "search should not crash for 10,000-char query"
@@ -60,7 +60,8 @@ fn search_whitespace_only_returns_empty() {
     helpers::create_search_project(&tmp);
     let (_config, conn, graph) = helpers::index_and_build(&tmp);
 
-    let results = ndxr::graph::search::hybrid_search(&conn, &graph, "   \t\n  ", 10, None).unwrap();
+    let results =
+        ndxr::graph::search::hybrid_search(&conn, &graph, "   \t\n  ", 10, None, None).unwrap();
     assert!(
         results.is_empty(),
         "whitespace-only query should return empty, got {} results",
@@ -75,7 +76,7 @@ fn search_newlines_and_tabs_in_query() {
     let (_config, conn, graph) = helpers::index_and_build(&tmp);
 
     let result =
-        ndxr::graph::search::hybrid_search(&conn, &graph, "auth\nvalidate\ttoken", 10, None);
+        ndxr::graph::search::hybrid_search(&conn, &graph, "auth\nvalidate\ttoken", 10, None, None);
     assert!(
         result.is_ok(),
         "search should not crash with newlines/tabs in query"
@@ -105,7 +106,7 @@ fn search_max_results_zero_returns_empty() {
     let (_config, conn, graph) = helpers::index_and_build(&tmp);
 
     let results =
-        ndxr::graph::search::hybrid_search(&conn, &graph, "authentication", 0, None).unwrap();
+        ndxr::graph::search::hybrid_search(&conn, &graph, "authentication", 0, None, None).unwrap();
     assert!(
         results.is_empty(),
         "max_results=0 should return empty, got {} results",
@@ -120,9 +121,9 @@ fn search_max_results_exceeds_candidates() {
     let (_config, conn, graph) = helpers::index_and_build(&tmp);
 
     let normal_results =
-        ndxr::graph::search::hybrid_search(&conn, &graph, "auth", 10, None).unwrap();
+        ndxr::graph::search::hybrid_search(&conn, &graph, "auth", 10, None, None).unwrap();
     let large_results =
-        ndxr::graph::search::hybrid_search(&conn, &graph, "auth", 1000, None).unwrap();
+        ndxr::graph::search::hybrid_search(&conn, &graph, "auth", 1000, None, None).unwrap();
 
     // Should not crash and should return the same results (we have fewer than 1000 symbols).
     assert_eq!(
@@ -157,7 +158,8 @@ fn search_all_intents_produce_results() {
 
     for (intent, expected_name) in &intents {
         let results =
-            ndxr::graph::search::hybrid_search(&conn, &graph, "auth", 5, Some(*intent)).unwrap();
+            ndxr::graph::search::hybrid_search(&conn, &graph, "auth", 5, Some(*intent), None)
+                .unwrap();
         assert!(
             !results.is_empty(),
             "intent {expected_name} should produce results for 'auth'"
@@ -221,6 +223,7 @@ fn search_with_relaxation_for_gibberish() {
         &graph,
         "xyzzy_nonexistent",
         5,
+        None,
         None,
     )
     .unwrap();

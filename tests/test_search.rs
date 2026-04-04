@@ -15,7 +15,8 @@ fn search_finds_auth_symbols() {
     let (_config, conn, graph) = helpers::index_and_build(&tmp);
 
     let results =
-        ndxr::graph::search::hybrid_search(&conn, &graph, "authentication", 10, None).unwrap();
+        ndxr::graph::search::hybrid_search(&conn, &graph, "authentication", 10, None, None)
+            .unwrap();
     assert!(!results.is_empty(), "should find auth-related symbols");
     // At least one result should be auth-related.
     assert!(results.iter().any(|r| r.fqn.contains("auth")
@@ -31,7 +32,8 @@ fn search_finds_database_symbols() {
     let (_config, conn, graph) = helpers::index_and_build(&tmp);
 
     let results =
-        ndxr::graph::search::hybrid_search(&conn, &graph, "database connection", 10, None).unwrap();
+        ndxr::graph::search::hybrid_search(&conn, &graph, "database connection", 10, None, None)
+            .unwrap();
     assert!(!results.is_empty(), "should find database-related symbols");
 }
 
@@ -42,7 +44,7 @@ fn search_results_have_breakdown() {
     let (_config, conn, graph) = helpers::index_and_build(&tmp);
 
     let results =
-        ndxr::graph::search::hybrid_search(&conn, &graph, "validate token", 5, None).unwrap();
+        ndxr::graph::search::hybrid_search(&conn, &graph, "validate token", 5, None, None).unwrap();
     for result in &results {
         assert!(result.score >= 0.0);
         assert!(!result.why.intent.is_empty());
@@ -62,6 +64,7 @@ fn intent_affects_results() {
         "auth",
         5,
         Some(ndxr::graph::intent::Intent::Debug),
+        None,
     )
     .unwrap();
     let understand_results = ndxr::graph::search::hybrid_search(
@@ -70,6 +73,7 @@ fn intent_affects_results() {
         "auth",
         5,
         Some(ndxr::graph::intent::Intent::Understand),
+        None,
     )
     .unwrap();
 
@@ -87,7 +91,7 @@ fn empty_query_returns_empty() {
     helpers::create_search_project(&tmp);
     let (_config, conn, graph) = helpers::index_and_build(&tmp);
 
-    let results = ndxr::graph::search::hybrid_search(&conn, &graph, "", 10, None).unwrap();
+    let results = ndxr::graph::search::hybrid_search(&conn, &graph, "", 10, None, None).unwrap();
     assert!(results.is_empty(), "empty query should return no results");
 }
 
@@ -98,7 +102,8 @@ fn nonexistent_term_returns_empty() {
     let (_config, conn, graph) = helpers::index_and_build(&tmp);
 
     let results =
-        ndxr::graph::search::hybrid_search(&conn, &graph, "zzzznonexistentterm", 10, None).unwrap();
+        ndxr::graph::search::hybrid_search(&conn, &graph, "zzzznonexistentterm", 10, None, None)
+            .unwrap();
     assert!(
         results.is_empty(),
         "query for nonexistent term should return no results"
@@ -123,7 +128,27 @@ fn search_with_special_characters_does_not_crash() {
         "   ",
     ];
     for query in &queries {
-        let result = ndxr::graph::search::hybrid_search(&conn, &graph, query, 5, None);
+        let result = ndxr::graph::search::hybrid_search(&conn, &graph, query, 5, None, None);
         assert!(result.is_ok(), "search should not crash for query: {query}");
     }
+}
+
+#[test]
+fn partial_query_boosts_full_match() {
+    let tmp = TempDir::new().unwrap();
+    helpers::create_search_project(&tmp);
+    let (_config, conn, graph) = helpers::index_and_build(&tmp);
+
+    let results =
+        ndxr::graph::search::hybrid_search(&conn, &graph, "auth", 10, None, None).unwrap();
+    assert!(
+        !results.is_empty(),
+        "partial query 'auth' should return results"
+    );
+    // At least one result should have a non-zero ngram score.
+    let has_ngram = results.iter().any(|r| r.why.ngram > 0.0);
+    assert!(
+        has_ngram,
+        "at least one result should have a non-zero ngram score for partial match 'auth'"
+    );
 }

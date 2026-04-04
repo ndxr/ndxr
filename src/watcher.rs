@@ -104,6 +104,7 @@ impl FileWatcher {
                         }
 
                         let paths: Vec<PathBuf> = pending.drain().collect();
+                        let changed_paths = paths.clone();
                         let engine_clone = engine.clone();
                         let graph_result = tokio::task::spawn_blocking(move || {
                             match crate::indexer::index_paths(&engine_clone.config, &paths) {
@@ -139,6 +140,13 @@ impl FileWatcher {
                             Err(e) => {
                                 tracing::error!("watcher: spawn_blocking panicked: {e}");
                             }
+                        }
+
+                        // Recompute embeddings for symbols in changed files.
+                        if let Some(ref model) = engine.embeddings_model {
+                            recompute_embeddings_for_paths(
+                                &engine, model, &changed_paths, &ws_root,
+                            ).await;
                         }
                     }
                 }
@@ -222,6 +230,106 @@ fn run_antipattern_detectors(db_path: &Path) {
             linked_fqns: pattern.involved_fqns.clone(),
         };
         let _ = crate::memory::store::save_observation(&conn, &obs);
+    }
+}
+
+/// Recomputes embeddings for symbols in the given changed file paths.
+///
+/// Strips the workspace root from absolute paths to match the relative paths
+/// stored in the database, queries affected symbols, and batch-embeds them.
+async fn recompute_embeddings_for_paths(
+    engine: &CoreEngine,
+    model: &crate::embeddings::model::ModelHandle,
+    changed_paths: &[PathBuf],
+    workspace_root: &Path,
+) {
+    // Convert absolute paths to relative paths matching the DB `files.path` column.
+    let relative_paths: Vec<String> = changed_paths
+        .iter()
+        .filter_map(|p| {
+            p.strip_prefix(workspace_root)
+                .ok()
+                .map(|rel| rel.to_string_lossy().to_string())
+        })
+        .collect();
+
+    if relative_paths.is_empty() {
+        return;
+    }
+
+    let conn = engine.conn.lock().await;
+    let mut items: Vec<(i64, String)> = Vec::new();
+    for path_chunk in relative_paths.chunks(crate::storage::db::BATCH_PARAM_LIMIT) {
+        let placeholders = crate::storage::db::build_batch_placeholders(path_chunk.len());
+        let sql = format!(
+            "SELECT s.id, s.name, s.signature, s.docstring \
+             FROM symbols s JOIN files f ON s.file_id = f.id \
+             WHERE f.path IN ({placeholders})"
+        );
+        let stmt_result = conn.prepare(&sql);
+        let mut stmt = match stmt_result {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("watcher: failed to prepare embedding query: {e}");
+                return;
+            }
+        };
+        let params: Vec<Box<dyn rusqlite::types::ToSql>> = path_chunk
+            .iter()
+            .map(|p| Box::new(p.clone()) as Box<dyn rusqlite::types::ToSql>)
+            .collect();
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(std::convert::AsRef::as_ref).collect();
+        let rows = match stmt.query_map(param_refs.as_slice(), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                crate::embeddings::model::symbol_to_embedding_text(
+                    &row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?.as_deref(),
+                    row.get::<_, Option<String>>(3)?.as_deref(),
+                ),
+            ))
+        }) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("watcher: failed to query symbols for embedding: {e}");
+                return;
+            }
+        };
+        for row in rows {
+            match row {
+                Ok(item) => items.push(item),
+                Err(e) => tracing::warn!("skipping symbol for embedding: {e}"),
+            }
+        }
+    }
+
+    if items.is_empty() {
+        drop(conn);
+        return;
+    }
+
+    // Drop conn before CPU-intensive embedding computation.
+    drop(conn);
+
+    let texts: Vec<&str> = items.iter().map(|(_, t)| t.as_str()).collect();
+    match model.embed_batch(&texts) {
+        Ok(embeddings) => {
+            let entries: Vec<(i64, &[f32])> = items
+                .iter()
+                .zip(embeddings.iter())
+                .map(|((id, _), emb)| (*id, emb.as_slice()))
+                .collect();
+            let conn = engine.conn.lock().await;
+            if let Err(e) = crate::embeddings::storage::store_embeddings(
+                &conn,
+                &entries,
+                crate::embeddings::download::DEFAULT_MODEL.name,
+            ) {
+                tracing::warn!("failed to store embeddings for changed files: {e}");
+            }
+        }
+        Err(e) => tracing::warn!("failed to compute embeddings for changed files: {e}"),
     }
 }
 

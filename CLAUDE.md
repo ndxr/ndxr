@@ -25,6 +25,8 @@ cargo run -- search "query"        # Search indexed symbols
 cargo run -- mcp                   # Start MCP server on stdio
 cargo run -- setup --scope project # Configure Claude Code integration
 cargo run -- upgrade          # Check for updates and self-upgrade
+cargo run -- model download  # Download embedding model for semantic search
+cargo run -- model status    # Show model and embedding coverage
 ```
 
 ## Architecture
@@ -71,6 +73,10 @@ CLI (clap)  /  MCP Server (rmcp, stdio)
 | `src/memory/antipatterns.rs` | `run_all_detectors()` — anti-pattern detection framework |
 | `src/graph/pathfinding.rs` | `find_paths()` — Yen's K-shortest paths for logic flow |
 | `src/upgrade.rs` | `check_for_update()`, `download_and_verify()`, `replace_binary()` — self-upgrade via GitHub releases |
+| `src/embeddings/model.rs` | `ModelHandle::load()`, `embed_text()`, `embed_batch()` — ONNX model inference |
+| `src/embeddings/download.rs` | `download_model()`, `verify_model()` — model download with SHA-256 |
+| `src/embeddings/storage.rs` | `store_embeddings()`, `load_embeddings()` — SQLite BLOB storage |
+| `src/embeddings/similarity.rs` | `cosine_similarity()`, `batch_cosine_similarity()` — vector math |
 
 ### Dependency Flow (No Cycles)
 
@@ -78,12 +84,13 @@ CLI (clap)  /  MCP Server (rmcp, stdio)
 
 ```
 main.rs -> all modules
-mcp/server -> capsule, config, graph, indexer, memory, skeleton, storage, watcher
+mcp/server -> capsule, config, embeddings, graph, indexer, memory, skeleton, storage, watcher
 capsule -> config, graph, skeleton, storage
-indexer -> graph, memory, storage, languages
+embeddings -> storage (for DB operations only)
+indexer -> embeddings, graph, memory, storage, languages
 graph -> indexer/tokenizer
 memory -> indexer/tokenizer, storage
-watcher -> indexer, graph, memory, storage, languages, mcp/server (CoreEngine)
+watcher -> embeddings, indexer, graph, memory, storage, languages, mcp/server (CoreEngine)
 upgrade -> (external: reqwest, semver, sha2, flate2, tar, zip, self_replace)
 ```
 
@@ -196,6 +203,9 @@ Every `.rs` file follows this top-to-bottom order. **Never mix sections.**
 - `resolve_budget()` / `trim_capsule_to_budget()` / `serialize_capsule()` → `mcp/server.rs`
 - `rebuild_graph_from_db()` → `graph/builder.rs` (used by watcher + MCP reindex tool)
 - `build_ignore_matcher()` → `watcher.rs` | `DEFAULT_IGNORED_DIRS` → `watcher.rs`
+- `symbol_to_embedding_text()` → `embeddings/model.rs`
+- `cosine_similarity()` → `embeddings/similarity.rs`
+- `trigram_similarity()` → `indexer/tokenizer.rs`
 
 ### No Dead Code / No Deferred Work
 
@@ -235,6 +245,10 @@ Every `.rs` file follows this top-to-bottom order. **Never mix sections.**
 | `DEFAULT_WINDOW_SECS` | 300 | memory/antipatterns.rs |
 | `CORRELATION_WINDOW_SECS` | 120 | memory/changes.rs |
 | `DEFAULT_IGNORED_DIRS` | 6 dirs | watcher.rs |
+| `EMBEDDING_DIMENSION` | 384 | embeddings/model.rs |
+| `EMBEDDING_BATCH_SIZE` | 32 | embeddings/model.rs |
+| `MAX_EMBEDDING_INPUT_CHARS` | 512 | embeddings/model.rs |
+| `DOCSTRING_TRUNCATION` | 200 | embeddings/model.rs |
 
 ## MCP Tools
 
@@ -277,6 +291,12 @@ Every `.rs` file follows this top-to-bottom order. **Never mix sections.**
 - **Watcher ignore matcher hot-reloads** — rebuilt automatically when `.ndxrignore` or `.gitignore` changes. Default exclusions (`target/`, `build/`, `bin/`, `node_modules/`, `.git/`, `dist/`) always apply
 - **MCP server graph is in-memory only** — built at startup from the DB. External `ndxr index`/`ndxr reindex` updates the DB but not the running server's graph. File watcher rebuilds it; otherwise restart required
 - **Observation ordering needs id tiebreaker** — `ORDER BY created_at` alone is non-deterministic for rows inserted within the same second. Always add `, id ASC/DESC` as secondary sort
+- **tract batch embedding is CPU-bound** — never call `embed_batch()` while holding the `Mutex<Connection>` lock. Release the lock, embed, re-acquire, store
+- **`symbol_embeddings` table always exists** — created unconditionally in V3 migration regardless of model presence
+- **Watcher uses `engine.embeddings_model`** — never call `ModelHandle::load()` from the watcher; use the model loaded at MCP startup
+- **`tokenizers` crate requires `fancy-regex`** — `default-features = false` strips the regex backend. Always include `features = ["fancy-regex"]`
+- **`CLAUDE_MD_SECTION` is MCP-tool-only** — the auto-generated section in `main.rs` documents MCP tools only. Non-MCP features (semantic search, n-gram) belong in the manually-maintained part of CLAUDE.md
+- **`ScoreBreakdown` literals in 5+ locations** — adding fields to `ScoreBreakdown` requires updating: `scoring.rs`, `relaxation.rs` (fts5_fallback), `builder.rs` (test), `server.rs` (tests), `test_smoke_capsule.rs`
 
 ## CI / Makefile Parity
 
@@ -323,3 +343,7 @@ Example: `mcp__ndxr__run_pipeline({ task: "fix the auth crash", intent: "debug" 
 - `mcp__ndxr__get_session_context` -- review session history
 - `mcp__ndxr__index_status` -- check if index is ready
 - `mcp__ndxr__reindex` -- force full re-index when index is stale (after git checkout, branch switch)
+
+### Semantic Search (Optional)
+
+Run `ndxr model download` to enable embedding-based semantic search. This downloads a 23 MiB model to `.ndxr/models/` that lets ndxr find semantically related code even when queries use different vocabulary than the source (e.g., "verify credentials" finds `authenticateUser`). If the model is not downloaded, ndxr works normally using lexical search.

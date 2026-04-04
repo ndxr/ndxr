@@ -5,6 +5,7 @@
 
 pub mod capsule;
 pub mod config;
+pub mod embeddings;
 pub mod graph;
 pub mod indexer;
 pub mod languages;

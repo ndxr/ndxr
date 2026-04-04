@@ -62,7 +62,8 @@ impl Default for CapsuleHints {
 /// Intent-specific scoring weights and capsule construction hints.
 ///
 /// Controls the relative importance of BM25 text matching, TF-IDF cosine
-/// similarity, and `PageRank` centrality in the hybrid score computation.
+/// similarity, `PageRank` centrality, character n-gram similarity, and
+/// semantic embedding similarity in the hybrid score computation.
 /// Also provides hints that shape capsule construction behavior.
 pub struct IntentWeights {
     /// Weight for BM25 full-text search score.
@@ -71,6 +72,10 @@ pub struct IntentWeights {
     pub w_tfidf: f64,
     /// Weight for `PageRank` centrality score.
     pub w_centrality: f64,
+    /// Weight for character trigram n-gram similarity score.
+    pub w_ngram: f64,
+    /// Weight for semantic embedding cosine similarity score.
+    pub w_semantic: f64,
     /// Additional boost rules that apply conditional score bonuses.
     pub boosts: Vec<BoostRule>,
     /// Hints that shape how the capsule builder allocates budget and context.
@@ -193,18 +198,18 @@ pub fn detect_intent(query: &str) -> Intent {
 
 /// Returns the scoring weights for a given intent.
 ///
-/// Each intent tunes the relative importance of BM25, TF-IDF, and centrality
-/// differently, and may include boost rules that reward specific symbol
-/// characteristics.
+/// When `has_embeddings` is true, allocates weight to the semantic signal
+/// by redistributing from other weights. When false, semantic weight is
+/// zero and other weights use the non-embedding distribution.
 #[must_use]
-pub fn get_weights(intent: &Intent) -> IntentWeights {
+pub fn get_weights(intent: &Intent, has_embeddings: bool) -> IntentWeights {
     match intent {
-        Intent::Debug => debug_weights(),
-        Intent::Refactor => refactor_weights(),
-        Intent::Modify => modify_weights(),
-        Intent::Explore => explore_weights(),
-        Intent::Understand => understand_weights(),
-        Intent::Test => test_weights(),
+        Intent::Debug => debug_weights(has_embeddings),
+        Intent::Refactor => refactor_weights(has_embeddings),
+        Intent::Modify => modify_weights(has_embeddings),
+        Intent::Explore => explore_weights(has_embeddings),
+        Intent::Understand => understand_weights(has_embeddings),
+        Intent::Test => test_weights(has_embeddings),
     }
 }
 
@@ -234,11 +239,18 @@ pub fn get_capsule_hints(intent: &Intent) -> CapsuleHints {
 }
 
 /// Weights for [`Intent::Debug`]: prioritize text match, boost error-related symbols.
-fn debug_weights() -> IntentWeights {
+fn debug_weights(has_embeddings: bool) -> IntentWeights {
+    let (w_bm25, w_tfidf, w_centrality, w_ngram, w_semantic) = if has_embeddings {
+        (0.30, 0.25, 0.20, 0.10, 0.15)
+    } else {
+        (0.35, 0.30, 0.25, 0.10, 0.00)
+    };
     IntentWeights {
-        w_bm25: 0.45,
-        w_tfidf: 0.30,
-        w_centrality: 0.25,
+        w_bm25,
+        w_tfidf,
+        w_centrality,
+        w_ngram,
+        w_semantic,
         boosts: vec![
             BoostRule {
                 description: "Symbols with error/exception/panic in name or kind",
@@ -263,11 +275,18 @@ fn debug_weights() -> IntentWeights {
 }
 
 /// Weights for [`Intent::Modify`]: balanced, boost registry/entry-point files and extension points.
-fn modify_weights() -> IntentWeights {
+fn modify_weights(has_embeddings: bool) -> IntentWeights {
+    let (w_bm25, w_tfidf, w_centrality, w_ngram, w_semantic) = if has_embeddings {
+        (0.25, 0.25, 0.25, 0.10, 0.15)
+    } else {
+        (0.30, 0.30, 0.30, 0.10, 0.00)
+    };
     IntentWeights {
-        w_bm25: 0.40,
-        w_tfidf: 0.35,
-        w_centrality: 0.25,
+        w_bm25,
+        w_tfidf,
+        w_centrality,
+        w_ngram,
+        w_semantic,
         boosts: vec![
             BoostRule {
                 description: "Registry/entry-point files (mod.rs, index.ts, __init__.py)",
@@ -290,11 +309,18 @@ fn modify_weights() -> IntentWeights {
 }
 
 /// Weights for [`Intent::Refactor`]: prioritize centrality, boost exported/high-degree symbols.
-fn refactor_weights() -> IntentWeights {
+fn refactor_weights(has_embeddings: bool) -> IntentWeights {
+    let (w_bm25, w_tfidf, w_centrality, w_ngram, w_semantic) = if has_embeddings {
+        (0.20, 0.20, 0.30, 0.15, 0.15)
+    } else {
+        (0.25, 0.25, 0.35, 0.15, 0.00)
+    };
     IntentWeights {
-        w_bm25: 0.30,
-        w_tfidf: 0.25,
-        w_centrality: 0.45,
+        w_bm25,
+        w_tfidf,
+        w_centrality,
+        w_ngram,
+        w_semantic,
         boosts: vec![
             BoostRule {
                 description: "Exported symbols (public API surface)",
@@ -316,11 +342,18 @@ fn refactor_weights() -> IntentWeights {
 }
 
 /// Weights for [`Intent::Explore`]: balanced, boost documented and central symbols.
-fn explore_weights() -> IntentWeights {
+fn explore_weights(has_embeddings: bool) -> IntentWeights {
+    let (w_bm25, w_tfidf, w_centrality, w_ngram, w_semantic) = if has_embeddings {
+        (0.30, 0.25, 0.20, 0.10, 0.15)
+    } else {
+        (0.35, 0.30, 0.25, 0.10, 0.00)
+    };
     IntentWeights {
-        w_bm25: 0.40,
-        w_tfidf: 0.35,
-        w_centrality: 0.25,
+        w_bm25,
+        w_tfidf,
+        w_centrality,
+        w_ngram,
+        w_semantic,
         boosts: vec![
             BoostRule {
                 description: "Symbols with docstrings",
@@ -338,11 +371,18 @@ fn explore_weights() -> IntentWeights {
 }
 
 /// Weights for [`Intent::Understand`]: prioritize TF-IDF, boost docs/modules/entry points.
-fn understand_weights() -> IntentWeights {
+fn understand_weights(has_embeddings: bool) -> IntentWeights {
+    let (w_bm25, w_tfidf, w_centrality, w_ngram, w_semantic) = if has_embeddings {
+        (0.25, 0.25, 0.20, 0.10, 0.20)
+    } else {
+        (0.30, 0.30, 0.25, 0.15, 0.00)
+    };
     IntentWeights {
-        w_bm25: 0.35,
-        w_tfidf: 0.40,
-        w_centrality: 0.25,
+        w_bm25,
+        w_tfidf,
+        w_centrality,
+        w_ngram,
+        w_semantic,
         boosts: vec![
             BoostRule {
                 description: "Symbols with docstrings",
@@ -374,11 +414,18 @@ fn understand_weights() -> IntentWeights {
 }
 
 /// Weights for [`Intent::Test`]: balanced with centrality, boost test-related symbols.
-fn test_weights() -> IntentWeights {
+fn test_weights(has_embeddings: bool) -> IntentWeights {
+    let (w_bm25, w_tfidf, w_centrality, w_ngram, w_semantic) = if has_embeddings {
+        (0.30, 0.25, 0.20, 0.10, 0.15)
+    } else {
+        (0.35, 0.30, 0.25, 0.10, 0.00)
+    };
     IntentWeights {
-        w_bm25: 0.40,
-        w_tfidf: 0.30,
-        w_centrality: 0.30,
+        w_bm25,
+        w_tfidf,
+        w_centrality,
+        w_ngram,
+        w_semantic,
         boosts: vec![
             BoostRule {
                 description: "Test files (*_test.*, *_spec.*, test_*.*)",
@@ -560,7 +607,7 @@ mod tests {
             Intent::Test,
         ];
         for intent in &intents {
-            let from_weights = get_weights(intent).capsule_hints;
+            let from_weights = get_weights(intent, false).capsule_hints;
             let standalone = get_capsule_hints(intent);
             assert_eq!(
                 from_weights.bfs_depth, standalone.bfs_depth,
@@ -579,7 +626,7 @@ mod tests {
 
     #[test]
     fn modify_boosts_registry_files() {
-        let w = get_weights(&Intent::Modify);
+        let w = get_weights(&Intent::Modify, false);
         let registry_boost = &w.boosts[0];
         // Registry files should trigger the boost.
         assert!((registry_boost.condition)(
@@ -629,7 +676,7 @@ mod tests {
 
     #[test]
     fn modify_boosts_exported_extension_points() {
-        let w = get_weights(&Intent::Modify);
+        let w = get_weights(&Intent::Modify, false);
         let extension_boost = &w.boosts[1];
         // Exported + high in-degree should trigger.
         assert!((extension_boost.condition)(
@@ -667,7 +714,7 @@ mod tests {
     #[test]
     fn existing_boosts_unaffected_by_file_path_param() {
         // Debug boosts should work the same regardless of file_path.
-        let w = get_weights(&Intent::Debug);
+        let w = get_weights(&Intent::Debug, false);
         assert!((w.boosts[0].condition)(
             "error_handler",
             false,
@@ -680,7 +727,7 @@ mod tests {
         ));
 
         // Refactor boosts.
-        let w = get_weights(&Intent::Refactor);
+        let w = get_weights(&Intent::Refactor, false);
         assert!((w.boosts[0].condition)(
             "function", true, false, 0, "any.rs"
         ));
@@ -700,11 +747,19 @@ mod tests {
             Intent::Test,
         ];
         for intent in &intents {
-            let w = get_weights(intent);
-            let sum = w.w_bm25 + w.w_tfidf + w.w_centrality;
+            let w = get_weights(intent, false);
+            let sum = w.w_bm25 + w.w_tfidf + w.w_centrality + w.w_ngram + w.w_semantic;
             assert!(
                 (sum - 1.0).abs() < 1e-10,
-                "weights for {intent:?} sum to {sum}, expected 1.0"
+                "weights (no embeddings) for {intent:?} sum to {sum}, expected 1.0"
+            );
+        }
+        for intent in &intents {
+            let w = get_weights(intent, true);
+            let sum = w.w_bm25 + w.w_tfidf + w.w_centrality + w.w_ngram + w.w_semantic;
+            assert!(
+                (sum - 1.0).abs() < 1e-10,
+                "weights (with embeddings) for {intent:?} sum to {sum}, expected 1.0"
             );
         }
     }

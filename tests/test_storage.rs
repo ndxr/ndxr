@@ -105,7 +105,7 @@ fn schema_version_is_tracked() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(version, 2, "all migrations should have run");
+    assert_eq!(version, 3, "all migrations should have run");
 }
 
 #[test]

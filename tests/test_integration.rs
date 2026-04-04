@@ -207,7 +207,8 @@ fn full_pipeline_integration() {
 
     // 4. Search for "authentication" — verify auth symbols found
     let results =
-        ndxr::graph::search::hybrid_search(&conn, &graph, "authentication", 10, None).unwrap();
+        ndxr::graph::search::hybrid_search(&conn, &graph, "authentication", 10, None, None)
+            .unwrap();
     assert!(!results.is_empty(), "search should find results");
     assert!(
         results.iter().any(|r| r.fqn.contains("auth")
@@ -314,9 +315,15 @@ export interface JwtPayload {
     );
 
     // 11. Auto-relaxation test: query that uses relaxation path
-    let relaxed =
-        ndxr::capsule::relaxation::search_with_relaxation(&conn, &graph, "authentication", 5, None)
-            .unwrap();
+    let relaxed = ndxr::capsule::relaxation::search_with_relaxation(
+        &conn,
+        &graph,
+        "authentication",
+        5,
+        None,
+        None,
+    )
+    .unwrap();
     assert!(
         !relaxed.results.is_empty(),
         "relaxation should return at least one result"
@@ -324,7 +331,8 @@ export interface JwtPayload {
 
     // 12. Search for database — verify DB symbols found
     let db_results =
-        ndxr::graph::search::hybrid_search(&conn, &graph, "database connection", 10, None).unwrap();
+        ndxr::graph::search::hybrid_search(&conn, &graph, "database connection", 10, None, None)
+            .unwrap();
     assert!(!db_results.is_empty(), "should find database symbols");
 }
 
@@ -342,7 +350,7 @@ fn concurrent_search_during_reindex() {
     let search_handle = std::thread::spawn(move || {
         let conn = ndxr::storage::db::open_or_create(&config2.db_path).unwrap();
         let graph = ndxr::graph::builder::build_graph(&conn).unwrap();
-        ndxr::graph::search::hybrid_search(&conn, &graph, "auth", 5, None).unwrap()
+        ndxr::graph::search::hybrid_search(&conn, &graph, "auth", 5, None, None).unwrap()
     });
 
     // Trigger incremental reindex in main thread

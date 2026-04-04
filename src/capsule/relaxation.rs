@@ -40,9 +40,10 @@ pub fn search_with_relaxation(
     query: &str,
     max_results: usize,
     intent: Option<Intent>,
+    embeddings_model: Option<&crate::embeddings::model::ModelHandle>,
 ) -> Result<SearchOutcome> {
     // Try normal search first.
-    let results = search::hybrid_search(conn, graph, query, max_results, intent)?;
+    let results = search::hybrid_search(conn, graph, query, max_results, intent, embeddings_model)?;
     if !results.is_empty() {
         return Ok(SearchOutcome {
             results,
@@ -52,7 +53,8 @@ pub fn search_with_relaxation(
 
     // Relaxation: try with a larger candidate pool.
     let relaxed_limit = max_results.saturating_mul(RELAXATION_MULTIPLIER);
-    let results = search::hybrid_search(conn, graph, query, relaxed_limit, intent)?;
+    let results =
+        search::hybrid_search(conn, graph, query, relaxed_limit, intent, embeddings_model)?;
     if !results.is_empty() {
         return Ok(SearchOutcome {
             results: results.into_iter().take(max_results).collect(),
@@ -113,6 +115,8 @@ fn fts5_fallback(conn: &Connection, query: &str, max_results: usize) -> Result<V
                     bm25: bm25_score.abs(),
                     tfidf: 0.0,
                     centrality: 0.0,
+                    ngram: 0.0,
+                    semantic: 0.0,
                     intent_boost: 0.0,
                     intent: "fallback".to_string(),
                     matched_terms: Vec::new(),

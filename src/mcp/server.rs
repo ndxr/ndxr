@@ -193,6 +193,8 @@ pub struct CoreEngine {
     pub conn: Mutex<rusqlite::Connection>,
     /// In-memory symbol graph, rebuilt after each index operation.
     pub graph: RwLock<Option<SymbolGraph>>,
+    /// Loaded embedding model for semantic search (None when model files absent).
+    pub embeddings_model: Option<crate::embeddings::model::ModelHandle>,
 }
 
 // ---------------------------------------------------------------------------
@@ -360,6 +362,7 @@ impl NdxrServer {
             workspace_root: &self.engine.config.workspace_root,
             recency_half_life_days: self.engine.config.recency_half_life_days,
             session_id: &self.session_id,
+            embeddings_model: self.engine.embeddings_model.as_ref(),
         })?;
 
         pipeline.capsule.impact_hints =
@@ -424,6 +427,7 @@ impl NdxrServer {
             workspace_root: &self.engine.config.workspace_root,
             recency_half_life_days: self.engine.config.recency_half_life_days,
             session_id: &self.session_id,
+            embeddings_model: self.engine.embeddings_model.as_ref(),
         })?;
 
         let record = capture::ToolCallRecord {
@@ -794,6 +798,8 @@ impl NdxrServer {
             "oldest_index_at": status.oldest_indexed_at,
             "newest_index_at": status.newest_indexed_at,
             "db_size_bytes": status.db_size_bytes,
+            "embeddings_count": status.embeddings_count,
+            "embeddings_model": status.embeddings_model,
             "workspace_root": self.engine.config.workspace_root.display().to_string(),
         });
 
@@ -968,10 +974,27 @@ pub async fn start_mcp_server(config: NdxrConfig) -> Result<()> {
         info!(compressed, "inactive sessions compressed");
     }
 
+    let models_dir = config.workspace_root.join(".ndxr").join("models");
+    let embeddings_model = match crate::embeddings::model::ModelHandle::load(&models_dir) {
+        Ok(Some(model)) => {
+            info!("embedding model loaded");
+            Some(model)
+        }
+        Ok(None) => {
+            info!("no embedding model found — semantic search disabled");
+            None
+        }
+        Err(e) => {
+            tracing::warn!("failed to load embedding model: {e}");
+            None
+        }
+    };
+
     let engine = Arc::new(CoreEngine {
         config,
         conn: Mutex::new(conn),
         graph: RwLock::new(Some(graph_result)),
+        embeddings_model,
     });
 
     // Start file watcher for incremental re-indexing
@@ -1050,6 +1073,8 @@ struct PipelineParams<'a> {
     workspace_root: &'a std::path::Path,
     recency_half_life_days: f64,
     session_id: &'a str,
+    /// Loaded embedding model for semantic scoring (None when unavailable).
+    embeddings_model: Option<&'a crate::embeddings::model::ModelHandle>,
 }
 
 /// Runs the shared capsule pipeline: search, build capsule, recall memories, populate stats.
@@ -1076,6 +1101,7 @@ fn run_capsule_pipeline(p: &PipelineParams<'_>) -> Result<PipelineResult, rmcp::
         p.query,
         DEFAULT_MAX_RESULTS,
         Some(p.intent),
+        p.embeddings_model,
     )
     .map_err(|e| rmcp::ErrorData::internal_error(format!("search failed: {e}"), None))?;
     let search_time_ms = search_start.elapsed().as_millis();
@@ -1567,6 +1593,8 @@ mod tests {
                             bm25: 0.5,
                             tfidf: 0.2,
                             centrality: 0.1,
+                            ngram: 0.0,
+                            semantic: 0.0,
                             intent_boost: 0.1,
                             intent: "test".to_owned(),
                             matched_terms: vec![],
@@ -1585,6 +1613,8 @@ mod tests {
                             bm25: 0.05,
                             tfidf: 0.02,
                             centrality: 0.02,
+                            ngram: 0.0,
+                            semantic: 0.0,
                             intent_boost: 0.01,
                             intent: "test".to_owned(),
                             matched_terms: vec![],

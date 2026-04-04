@@ -1,8 +1,8 @@
 //! Score normalization and hybrid score computation.
 //!
 //! Provides min-max normalization for raw score vectors and a hybrid scoring
-//! function that combines BM25, TF-IDF, and centrality with intent-specific
-//! weights.
+//! function that combines BM25, TF-IDF, centrality, character n-gram similarity,
+//! and semantic embedding similarity with intent-specific weights.
 
 use std::borrow::Cow;
 
@@ -20,6 +20,10 @@ pub struct ScoreBreakdown {
     pub tfidf: f64,
     /// Normalized `PageRank` centrality in \[0, 1\].
     pub centrality: f64,
+    /// Trigram Jaccard similarity in \[0, 1\].
+    pub ngram: f64,
+    /// Semantic embedding cosine similarity in \[0, 1\].
+    pub semantic: f64,
     /// Cumulative intent-specific boost applied.
     pub intent_boost: f64,
     /// Name of the detected (or overridden) intent.
@@ -51,19 +55,23 @@ pub fn normalize_min_max(scores: &[f64]) -> Vec<f64> {
 
 /// Computes the hybrid score from normalized components.
 ///
-/// Combines the three signal dimensions using the intent-specific weights
+/// Combines the five signal dimensions using the intent-specific weights
 /// and adds any intent boost on top.
 #[must_use]
 pub const fn compute_hybrid_score(
     bm25: f64,
     tfidf: f64,
     centrality: f64,
+    ngram: f64,
+    semantic: f64,
     intent_boost: f64,
     weights: &IntentWeights,
 ) -> f64 {
     weights.w_bm25 * bm25
         + weights.w_tfidf * tfidf
         + weights.w_centrality * centrality
+        + weights.w_ngram * ngram
+        + weights.w_semantic * semantic
         + intent_boost
 }
 
@@ -78,6 +86,10 @@ pub struct BreakdownParams {
     pub tfidf: f64,
     /// Normalized centrality.
     pub centrality: f64,
+    /// Trigram n-gram similarity.
+    pub ngram: f64,
+    /// Semantic embedding similarity.
+    pub semantic: f64,
     /// Cumulative intent boost.
     pub intent_boost: f64,
     /// Intent name string.
@@ -100,6 +112,8 @@ pub fn generate_breakdown(params: BreakdownParams) -> ScoreBreakdown {
         bm25,
         tfidf,
         centrality,
+        ngram,
+        semantic,
         intent_boost,
         intent,
         matched_terms,
@@ -119,6 +133,12 @@ pub fn generate_breakdown(params: BreakdownParams) -> ScoreBreakdown {
     if intent_boost > 0.0 {
         parts.push(format!("{intent}-boosted").into());
     }
+    if ngram > 0.3 {
+        parts.push("Partial name match".into());
+    }
+    if semantic > 0.5 {
+        parts.push("Semantic match".into());
+    }
     if has_docstring {
         parts.push("Has documentation".into());
     }
@@ -132,6 +152,8 @@ pub fn generate_breakdown(params: BreakdownParams) -> ScoreBreakdown {
         bm25,
         tfidf,
         centrality,
+        ngram,
+        semantic,
         intent_boost,
         intent,
         matched_terms,
@@ -178,27 +200,46 @@ mod tests {
     #[test]
     fn compute_hybrid_score_basic() {
         let weights = crate::graph::intent::IntentWeights {
-            w_bm25: 0.4,
-            w_tfidf: 0.3,
-            w_centrality: 0.3,
+            w_bm25: 0.35,
+            w_tfidf: 0.30,
+            w_centrality: 0.25,
+            w_ngram: 0.10,
+            w_semantic: 0.00,
             boosts: vec![],
             capsule_hints: crate::graph::intent::CapsuleHints::default(),
         };
-        let score = compute_hybrid_score(1.0, 1.0, 1.0, 0.0, &weights);
+        let score = compute_hybrid_score(1.0, 1.0, 1.0, 1.0, 0.0, 0.0, &weights);
         assert!((score - 1.0).abs() < 1e-10);
     }
 
     #[test]
     fn compute_hybrid_score_with_boost() {
         let weights = crate::graph::intent::IntentWeights {
-            w_bm25: 0.4,
-            w_tfidf: 0.3,
-            w_centrality: 0.3,
+            w_bm25: 0.35,
+            w_tfidf: 0.30,
+            w_centrality: 0.25,
+            w_ngram: 0.10,
+            w_semantic: 0.00,
             boosts: vec![],
             capsule_hints: crate::graph::intent::CapsuleHints::default(),
         };
-        let score = compute_hybrid_score(1.0, 1.0, 1.0, 0.5, &weights);
+        let score = compute_hybrid_score(1.0, 1.0, 1.0, 1.0, 0.0, 0.5, &weights);
         assert!((score - 1.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn compute_hybrid_score_five_signals() {
+        let weights = crate::graph::intent::IntentWeights {
+            w_bm25: 0.30,
+            w_tfidf: 0.25,
+            w_centrality: 0.20,
+            w_ngram: 0.10,
+            w_semantic: 0.15,
+            boosts: vec![],
+            capsule_hints: crate::graph::intent::CapsuleHints::default(),
+        };
+        let score = compute_hybrid_score(1.0, 1.0, 1.0, 1.0, 1.0, 0.0, &weights);
+        assert!((score - 1.0).abs() < 1e-10);
     }
 
     #[test]
@@ -207,6 +248,8 @@ mod tests {
             bm25: 0.3,
             tfidf: 0.3,
             centrality: 0.3,
+            ngram: 0.0,
+            semantic: 0.0,
             intent_boost: 0.0,
             intent: "explore".to_string(),
             matched_terms: vec![],
@@ -222,6 +265,8 @@ mod tests {
             bm25: 0.9,
             tfidf: 0.8,
             centrality: 0.9,
+            ngram: 0.0,
+            semantic: 0.0,
             intent_boost: 0.2,
             intent: "debug".to_string(),
             matched_terms: vec!["auth".to_string()],
@@ -233,5 +278,39 @@ mod tests {
         assert!(bd.reason.contains("High TF-IDF similarity"));
         assert!(bd.reason.contains("debug-boosted"));
         assert!(bd.reason.contains("Has documentation"));
+    }
+
+    #[test]
+    fn generate_breakdown_partial_name_match() {
+        let bd = generate_breakdown(BreakdownParams {
+            bm25: 0.3,
+            tfidf: 0.3,
+            centrality: 0.3,
+            ngram: 0.5,
+            semantic: 0.0,
+            intent_boost: 0.0,
+            intent: "explore".to_string(),
+            matched_terms: vec![],
+            in_degree: 0,
+            has_docstring: false,
+        });
+        assert!(bd.reason.contains("Partial name match"));
+    }
+
+    #[test]
+    fn generate_breakdown_semantic_match() {
+        let bd = generate_breakdown(BreakdownParams {
+            bm25: 0.3,
+            tfidf: 0.3,
+            centrality: 0.3,
+            ngram: 0.0,
+            semantic: 0.7,
+            intent_boost: 0.0,
+            intent: "explore".to_string(),
+            matched_terms: vec![],
+            in_degree: 0,
+            has_docstring: false,
+        });
+        assert!(bd.reason.contains("Semantic match"));
     }
 }

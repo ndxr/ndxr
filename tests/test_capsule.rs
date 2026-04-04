@@ -17,7 +17,8 @@ fn capsule_respects_token_budget() {
 
     let (config, conn, graph) = helpers::index_and_build(&tmp);
 
-    let results = ndxr::graph::search::hybrid_search(&conn, &graph, "auth", 10, None).unwrap();
+    let results =
+        ndxr::graph::search::hybrid_search(&conn, &graph, "auth", 10, None, None).unwrap();
     let estimator = ndxr::config::TokenEstimator::default();
     let (capsule, _memory_budget) =
         ndxr::capsule::builder::build_capsule(&ndxr::capsule::builder::CapsuleRequest {
@@ -45,7 +46,8 @@ fn capsule_no_file_in_both_pivots_and_skeletons() {
 
     let (config, conn, graph) = helpers::index_and_build(&tmp);
 
-    let results = ndxr::graph::search::hybrid_search(&conn, &graph, "validate", 10, None).unwrap();
+    let results =
+        ndxr::graph::search::hybrid_search(&conn, &graph, "validate", 10, None, None).unwrap();
     let estimator = ndxr::config::TokenEstimator::default();
     let (capsule, _memory_budget) =
         ndxr::capsule::builder::build_capsule(&ndxr::capsule::builder::CapsuleRequest {
@@ -77,7 +79,8 @@ fn capsule_pivots_contain_file_content() {
 
     let (config, conn, graph) = helpers::index_and_build(&tmp);
 
-    let results = ndxr::graph::search::hybrid_search(&conn, &graph, "auth", 10, None).unwrap();
+    let results =
+        ndxr::graph::search::hybrid_search(&conn, &graph, "auth", 10, None, None).unwrap();
     let estimator = ndxr::config::TokenEstimator::default();
     let (capsule, _memory_budget) =
         ndxr::capsule::builder::build_capsule(&ndxr::capsule::builder::CapsuleRequest {
@@ -109,7 +112,7 @@ fn relaxation_returns_results_for_any_query() {
     let (_config, conn, graph) = helpers::index_and_build(&tmp);
 
     let outcome =
-        ndxr::capsule::relaxation::search_with_relaxation(&conn, &graph, "validate", 5, None)
+        ndxr::capsule::relaxation::search_with_relaxation(&conn, &graph, "validate", 5, None, None)
             .unwrap();
     assert!(!outcome.results.is_empty());
 }
@@ -121,7 +124,8 @@ fn impact_hints_generated() {
 
     let (_config, conn, graph) = helpers::index_and_build(&tmp);
 
-    let results = ndxr::graph::search::hybrid_search(&conn, &graph, "validate", 5, None).unwrap();
+    let results =
+        ndxr::graph::search::hybrid_search(&conn, &graph, "validate", 5, None, None).unwrap();
     let hints = ndxr::capsule::builder::generate_impact_hints(&graph, &results);
     for hint in &hints {
         assert!(
@@ -171,7 +175,8 @@ fn refactor_intent_produces_more_skeletons_than_explore() {
     helpers::create_capsule_project(&tmp);
 
     let (config, conn, graph) = helpers::index_and_build(&tmp);
-    let results = ndxr::graph::search::hybrid_search(&conn, &graph, "validate", 10, None).unwrap();
+    let results =
+        ndxr::graph::search::hybrid_search(&conn, &graph, "validate", 10, None, None).unwrap();
     let estimator = ndxr::config::TokenEstimator::default();
 
     let (explore_capsule, _) =

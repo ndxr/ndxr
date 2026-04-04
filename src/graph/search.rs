@@ -1,12 +1,16 @@
-//! Hybrid search combining FTS5 BM25, TF-IDF cosine similarity, and `PageRank` centrality.
+//! Hybrid search combining five scoring signals: FTS5 BM25, TF-IDF cosine
+//! similarity, `PageRank` centrality, character n-gram similarity, and
+//! optional semantic embedding similarity.
 //!
-//! Implements a six-stage search pipeline:
+//! Implements an eight-stage search pipeline:
 //! 1. Detect query intent (or accept an override)
 //! 2. Collect FTS5 candidates with BM25 scores
 //! 3. Compute TF-IDF cosine similarity for each candidate
 //! 4. Look up centrality and in-degree from the graph
-//! 5. Normalize all scores to \[0, 1\] and apply intent weights + boosts
-//! 6. Sort by hybrid score descending and return the top N results
+//! 5. Compute n-gram trigram similarity against query
+//! 6. Compute semantic embedding similarity (when model is loaded)
+//! 7. Normalize all scores to \[0, 1\] and apply intent weights + boosts
+//! 8. Sort by hybrid score descending and return the top N results
 
 use std::collections::HashMap;
 
@@ -69,6 +73,8 @@ struct Candidate {
     centrality: f64,
     in_degree: usize,
     matched_terms: Vec<String>,
+    ngram: f64,
+    semantic: f64,
 }
 
 /// Performs hybrid search over the indexed codebase.
@@ -92,9 +98,11 @@ pub fn hybrid_search(
     query: &str,
     max_results: usize,
     intent_override: Option<Intent>,
+    embeddings_model: Option<&crate::embeddings::model::ModelHandle>,
 ) -> Result<Vec<SearchResult>> {
     let intent = intent_override.unwrap_or_else(|| intent::detect_intent(query));
-    let weights = intent::get_weights(&intent);
+    let has_embeddings = embeddings_model.is_some();
+    let weights = intent::get_weights(&intent, has_embeddings);
     let intent_name = intent.name().to_owned();
 
     // 1. Tokenize query for TF-IDF.
@@ -125,12 +133,29 @@ pub fn hybrid_search(
         return Ok(vec![]);
     }
 
+    // Compute n-gram similarity for each candidate against query.
+    for candidate in &mut candidates {
+        let fqn_symbol = candidate.fqn.rsplit("::").next().unwrap_or(&candidate.fqn);
+        candidate.ngram = f64::max(
+            tokenizer::trigram_similarity(query, &candidate.name),
+            tokenizer::trigram_similarity(query, fqn_symbol),
+        );
+    }
+
+    enrich_semantic_scores(conn, query, embeddings_model, &mut candidates);
+
     // 6. Normalize scores.
     let bm25_raw: Vec<f64> = candidates.iter().map(|c| c.bm25_raw).collect();
     let bm25_norm = scoring::normalize_min_max(&bm25_raw);
 
     let centralities: Vec<f64> = candidates.iter().map(|c| c.centrality).collect();
     let centrality_norm = scoring::normalize_min_max(&centralities);
+
+    let ngrams: Vec<f64> = candidates.iter().map(|c| c.ngram).collect();
+    let ngram_norm = scoring::normalize_min_max(&ngrams);
+
+    let semantics: Vec<f64> = candidates.iter().map(|c| c.semantic).collect();
+    let semantic_norm = scoring::normalize_min_max(&semantics);
 
     // TF-IDF cosine is already in [0, 1].
 
@@ -159,13 +184,22 @@ pub fn hybrid_search(
                 .map(|b| b.value)
                 .sum();
 
-            let hybrid =
-                scoring::compute_hybrid_score(bm25_n, tfidf_n, cent_n, intent_boost, &weights);
+            let hybrid = scoring::compute_hybrid_score(
+                bm25_n,
+                tfidf_n,
+                cent_n,
+                ngram_norm[i],
+                semantic_norm[i],
+                intent_boost,
+                &weights,
+            );
 
             let breakdown = scoring::generate_breakdown(scoring::BreakdownParams {
                 bm25: bm25_n,
                 tfidf: tfidf_n,
                 centrality: cent_n,
+                ngram: ngram_norm[i],
+                semantic: semantic_norm[i],
                 intent_boost,
                 intent: intent_name.clone(),
                 matched_terms: std::mem::take(&mut c.matched_terms),
@@ -285,6 +319,8 @@ fn collect_fts_candidates(
             centrality: meta.centrality,
             in_degree,
             matched_terms,
+            ngram: 0.0,
+            semantic: 0.0,
         });
     }
 
@@ -539,6 +575,45 @@ fn tfidf_cosine(
         0.0
     } else {
         (dot_product / magnitude).clamp(0.0, 1.0)
+    }
+}
+
+/// Enriches candidates with semantic similarity scores from the embedding model.
+///
+/// When the model is `None`, this is a no-op. Failures to embed the query or
+/// load stored embeddings are logged as warnings and silently skipped.
+fn enrich_semantic_scores(
+    conn: &Connection,
+    query: &str,
+    embeddings_model: Option<&crate::embeddings::model::ModelHandle>,
+    candidates: &mut [Candidate],
+) {
+    let Some(model) = embeddings_model else {
+        return;
+    };
+    let query_embedding = match model.embed_text(query) {
+        Ok(emb) => emb,
+        Err(e) => {
+            tracing::warn!("failed to embed query: {e}");
+            return;
+        }
+    };
+    let candidate_ids: Vec<i64> = candidates.iter().map(|c| c.symbol_id).collect();
+    let stored = match crate::embeddings::storage::load_embeddings(conn, &candidate_ids) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("failed to load embeddings: {e}");
+            return;
+        }
+    };
+    for candidate in candidates.iter_mut() {
+        if let Some(emb) = stored.get(&candidate.symbol_id) {
+            let sim = f64::from(crate::embeddings::similarity::cosine_similarity(
+                &query_embedding,
+                emb,
+            ));
+            candidate.semantic = sim.max(0.0);
+        }
     }
 }
 

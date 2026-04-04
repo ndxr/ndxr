@@ -25,6 +25,7 @@ AI coding agents waste most of their context window reading irrelevant files. nd
 | Refactoring blind spots | No blast radius awareness | Impact graph shows callers, callees, and risk level |
 | No execution flow visibility | Can't trace call chains | Logic flow traces paths between any two symbols |
 | Repeating mistakes | No behavior analysis | Anti-pattern detection warns about thrashing and dead ends |
+| Vocabulary mismatch | Text search misses synonyms | Semantic embeddings bridge meaning gaps |
 | Slow on large codebases | Re-reads everything | Incremental indexing -- only changed files are re-parsed |
 
 ### Key Features
@@ -38,6 +39,8 @@ AI coding agents waste most of their context window reading irrelevant files. nd
 - **Logic flow tracing** -- Find execution paths between any two symbols via Yen's K-shortest paths
 - **AST structural diffs** -- Tracks symbol additions, removals, signature changes, renames across sessions
 - **Anti-pattern detection** -- Warns about dead-end explorations, file thrashing, and circular searches
+- **Semantic search** -- Download a 23 MiB model to enable meaning-based ranking that bridges vocabulary gaps
+- **Character n-gram matching** -- Partial queries like "auth" boost "authenticate" and "AuthService"
 - **Auto-relaxation** -- Never returns empty results. Progressively relaxes search if needed
 - **Cross-platform** -- Linux, macOS, Windows. Single static binary, no runtime dependencies
 
@@ -66,7 +69,7 @@ That's it. Claude Code will now automatically call ndxr before reading or modify
 
 ## How It Works
 
-ndxr parses your codebase into symbols (functions, classes, methods, types) and edges (calls, imports, extends). It then ranks everything using three signals:
+ndxr parses your codebase into symbols (functions, classes, methods, types) and edges (calls, imports, extends). It then ranks everything using up to five signals:
 
 ```
   Source Files       tree-sitter        SQLite + FTS5        petgraph
@@ -79,6 +82,7 @@ ndxr parses your codebase into symbols (functions, classes, methods, types) and 
                                      +----------------------------+
                                      |      Hybrid Search         |
                                      |  BM25 + TF-IDF + PageRank  |
+                                     |  + N-gram + Semantic (opt) |
                                      |  + Intent Detection        |
                                      +------------+---------------+
                                                   |
@@ -98,7 +102,7 @@ ndxr parses your codebase into symbols (functions, classes, methods, types) and 
                                      +----------------------------+
 ```
 
-**Hybrid Search** -- Combines full-text relevance (BM25), semantic similarity (TF-IDF), and structural importance (PageRank). Automatically adjusts scoring based on detected intent: debug, test, refactor, modify, understand, or explore.
+**Hybrid Search** -- Combines full-text relevance (BM25), term similarity (TF-IDF), structural importance (PageRank), character n-gram matching, and optional semantic embeddings. Automatically adjusts scoring based on detected intent: debug, test, refactor, modify, understand, or explore.
 
 **Context Capsules** -- Packs the most relevant code into a token budget. Pivot files get full source. Adjacent files get signature-only skeletons. Past observations and impact hints are included when relevant. The budget is never exceeded.
 
@@ -151,6 +155,8 @@ ndxr search "query" [-n 10] [--intent debug] [--explain]
 ndxr skeleton src/auth.ts [--docs true|false]
 ndxr activity [--limit N] [--follow]  # Show recent MCP tool activity
 ndxr upgrade [--check] [--force]      # Check for updates and self-upgrade
+ndxr model download                   # Download embedding model for semantic search
+ndxr model status                     # Show model and embedding coverage
 ```
 
 Run `ndxr <command> --help` for detailed help on any command.

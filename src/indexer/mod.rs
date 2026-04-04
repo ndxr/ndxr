@@ -47,6 +47,8 @@ pub struct IndexStats {
     pub duration_ms: u128,
     /// Number of observations marked stale due to symbol changes.
     pub observations_marked_stale: usize,
+    /// Number of symbols for which embedding vectors were computed.
+    pub embeddings_computed: usize,
 }
 
 /// Performs incremental indexing of the workspace.
@@ -165,7 +167,7 @@ fn index_inner(config: &NdxrConfig, skip_changes: bool) -> Result<IndexStats> {
     };
 
     // 6. Write to DB in a single transaction.
-    write_index_results(&conn, &results, &deleted, &diff, &mut stats)?;
+    let fqn_to_id = write_index_results(&conn, &results, &deleted, &diff, &mut stats)?;
 
     // 7. Post-index: build graph and compute PageRank.
     //    These run AFTER the transaction commits since PageRank reads from DB.
@@ -177,7 +179,15 @@ fn index_inner(config: &NdxrConfig, skip_changes: bool) -> Result<IndexStats> {
         "graph built and PageRank computed"
     );
 
-    // 8. Detect observation staleness for changed symbols.
+    // 8. Compute embeddings for indexed symbols (skipped if model absent).
+    let models_dir = config.workspace_root.join(".ndxr").join("models");
+    let embeddings_computed = compute_embeddings(&conn, &results, &fqn_to_id, &models_dir)?;
+    if embeddings_computed > 0 {
+        info!(count = embeddings_computed, "embeddings computed");
+    }
+    stats.embeddings_computed = embeddings_computed;
+
+    // 9. Detect observation staleness for changed symbols.
     if !skip_changes {
         let reindexed_paths: Vec<String> = results
             .iter()
@@ -303,7 +313,7 @@ pub fn index_paths(config: &NdxrConfig, changed_paths: &[PathBuf]) -> Result<Ind
         .collect();
     let pre_index_symbols = memory::changes::snapshot_symbol_state(&conn, &fqns, &deleted_norm)?;
 
-    write_index_results(&conn, &results, &all_deleted, &diff, &mut stats)?;
+    let _fqn_to_id = write_index_results(&conn, &results, &all_deleted, &diff, &mut stats)?;
 
     // NOTE: graph + PageRank rebuild is intentionally skipped here.
     // The file watcher (the primary caller of `index_paths`) rebuilds the
@@ -340,11 +350,15 @@ pub fn index_paths(config: &NdxrConfig, changed_paths: &[PathBuf]) -> Result<Ind
 pub fn reindex(config: &NdxrConfig) -> Result<IndexStats> {
     let conn = storage::db::open_or_create(&config.db_path)?;
     storage::db::reset_code_tables(&conn)?;
+    crate::embeddings::storage::clear_embeddings(&conn)?;
     drop(conn);
     index_inner(config, true)
 }
 
 /// Writes parse results and deletions to the database in a single transaction.
+///
+/// Returns the combined FQN-to-ID map for all inserted symbols, used by the
+/// embedding computation step that runs after the transaction commits.
 ///
 /// Within the transaction:
 /// 1. Deletes rows for changed files (CASCADE handles symbols/edges/TF)
@@ -360,7 +374,7 @@ fn write_index_results(
     deleted: &[PathBuf],
     diff: &[(PathBuf, manifest::FileStatus)],
     stats: &mut IndexStats,
-) -> Result<()> {
+) -> Result<HashMap<String, i64>> {
     let tx = conn
         .unchecked_transaction()
         .context("begin index transaction")?;
@@ -476,7 +490,56 @@ fn write_index_results(
     compute_tfidf(&tx, results, &all_fqn_to_id)?;
 
     tx.commit().context("commit index transaction")?;
-    Ok(())
+    Ok(all_fqn_to_id)
+}
+
+/// Computes and stores embedding vectors for indexed symbols.
+///
+/// Loads the embedding model from `.ndxr/models/`. If the model is not
+/// present, returns 0 (silently skips). Uses batch inference for efficiency.
+fn compute_embeddings(
+    conn: &rusqlite::Connection,
+    results: &[parser::ParseResult],
+    fqn_to_id: &HashMap<String, i64>,
+    models_dir: &std::path::Path,
+) -> Result<usize> {
+    let Some(model) = crate::embeddings::model::ModelHandle::load(models_dir)? else {
+        return Ok(0);
+    };
+
+    let mut items: Vec<(i64, String)> = Vec::new();
+    for result in results {
+        for symbol in &result.symbols {
+            if let Some(&id) = fqn_to_id.get(&symbol.fqn) {
+                let text = crate::embeddings::model::symbol_to_embedding_text(
+                    &symbol.name,
+                    symbol.signature.as_deref(),
+                    symbol.docstring.as_deref(),
+                );
+                items.push((id, text));
+            }
+        }
+    }
+
+    if items.is_empty() {
+        return Ok(0);
+    }
+
+    let texts: Vec<&str> = items.iter().map(|(_, t)| t.as_str()).collect();
+    let embeddings = model.embed_batch(&texts)?;
+    let entries: Vec<(i64, &[f32])> = items
+        .iter()
+        .zip(embeddings.iter())
+        .map(|((id, _), emb)| (*id, emb.as_slice()))
+        .collect();
+
+    crate::embeddings::storage::store_embeddings(
+        conn,
+        &entries,
+        crate::embeddings::download::DEFAULT_MODEL.name,
+    )?;
+
+    Ok(entries.len())
 }
 
 /// Computes TF-IDF term frequencies for all symbols in the given parse results.

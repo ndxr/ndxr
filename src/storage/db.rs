@@ -296,13 +296,24 @@ CREATE INDEX IF NOT EXISTS idx_changes_kind ON symbol_changes(change_kind);
 CREATE INDEX IF NOT EXISTS idx_changes_session ON symbol_changes(session_id);
 ";
 
+/// Embeddings table for semantic search vectors.
+const CREATE_SYMBOL_EMBEDDINGS: &str = "
+CREATE TABLE IF NOT EXISTS symbol_embeddings (
+    symbol_id   INTEGER PRIMARY KEY REFERENCES symbols(id) ON DELETE CASCADE,
+    embedding   BLOB NOT NULL,
+    model_name  TEXT NOT NULL,
+    created_at  INTEGER NOT NULL
+);
+";
+
 // ---------------------------------------------------------------------------
 // Migrations
 // ---------------------------------------------------------------------------
 
 /// Each migration function receives a transaction and applies one schema step.
 /// Migrations are cumulative and never removed.
-const MIGRATIONS: &[fn(&rusqlite::Transaction<'_>) -> Result<()>] = &[migrate_v1, migrate_v2];
+const MIGRATIONS: &[fn(&rusqlite::Transaction<'_>) -> Result<()>] =
+    &[migrate_v1, migrate_v2, migrate_v3];
 
 /// V1: create the full initial schema.
 fn migrate_v1(tx: &rusqlite::Transaction<'_>) -> Result<()> {
@@ -327,6 +338,13 @@ fn migrate_v2(tx: &rusqlite::Transaction<'_>) -> Result<()> {
         .context("v2: create symbol_changes table")?;
     tx.execute_batch(CREATE_SYMBOL_CHANGES_INDEXES)
         .context("v2: create symbol_changes indexes")?;
+    Ok(())
+}
+
+/// V3: add `symbol_embeddings` table for semantic search vectors.
+fn migrate_v3(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    tx.execute_batch(CREATE_SYMBOL_EMBEDDINGS)
+        .context("v3: create symbol_embeddings table")?;
     Ok(())
 }
 
@@ -427,7 +445,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_migration_is_idempotent() {
+    fn migrations_are_idempotent() {
         let tmp = TempDir::new().unwrap();
         let db_path = tmp.path().join("test.db");
         let conn1 = open_or_create(&db_path).unwrap();
@@ -438,7 +456,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, MIGRATIONS.len() as i64);
     }
 
     #[test]

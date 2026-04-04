@@ -44,7 +44,8 @@ fn capsule_tiny_budget_no_overflow() {
     helpers::create_capsule_project(&tmp);
     let (config, conn, graph) = helpers::index_and_build(&tmp);
 
-    let results = ndxr::graph::search::hybrid_search(&conn, &graph, "auth", 10, None).unwrap();
+    let results =
+        ndxr::graph::search::hybrid_search(&conn, &graph, "auth", 10, None, None).unwrap();
 
     let capsule =
         build_capsule_with_budget(&conn, &graph, &results, "auth", 10, &config.workspace_root);
@@ -69,7 +70,8 @@ fn capsule_budget_one_still_respects_invariant() {
     helpers::create_capsule_project(&tmp);
     let (config, conn, graph) = helpers::index_and_build(&tmp);
 
-    let results = ndxr::graph::search::hybrid_search(&conn, &graph, "validate", 10, None).unwrap();
+    let results =
+        ndxr::graph::search::hybrid_search(&conn, &graph, "validate", 10, None, None).unwrap();
 
     let capsule = build_capsule_with_budget(
         &conn,
@@ -95,7 +97,8 @@ fn capsule_large_budget_fits_everything() {
     helpers::create_capsule_project(&tmp);
     let (config, conn, graph) = helpers::index_and_build(&tmp);
 
-    let results = ndxr::graph::search::hybrid_search(&conn, &graph, "auth", 10, None).unwrap();
+    let results =
+        ndxr::graph::search::hybrid_search(&conn, &graph, "auth", 10, None, None).unwrap();
     assert!(!results.is_empty(), "search should return results");
 
     let capsule = build_capsule_with_budget(
@@ -138,7 +141,7 @@ fn capsule_single_search_result() {
 
     // Search for "setupRoutes" which should return exactly 1 result.
     let results =
-        ndxr::graph::search::hybrid_search(&conn, &graph, "setupRoutes", 1, None).unwrap();
+        ndxr::graph::search::hybrid_search(&conn, &graph, "setupRoutes", 1, None, None).unwrap();
     // Take at most 1 result to guarantee single-result scenario.
     let single = if results.is_empty() {
         vec![]
@@ -171,7 +174,8 @@ fn capsule_stats_consistency() {
     helpers::create_capsule_project(&tmp);
     let (config, conn, graph) = helpers::index_and_build(&tmp);
 
-    let results = ndxr::graph::search::hybrid_search(&conn, &graph, "auth", 10, None).unwrap();
+    let results =
+        ndxr::graph::search::hybrid_search(&conn, &graph, "auth", 10, None, None).unwrap();
 
     let capsule = build_capsule_with_budget(
         &conn,
@@ -203,7 +207,8 @@ fn capsule_no_duplicate_files_across_pivots() {
     helpers::create_capsule_project(&tmp);
     let (config, conn, graph) = helpers::index_and_build(&tmp);
 
-    let results = ndxr::graph::search::hybrid_search(&conn, &graph, "validate", 10, None).unwrap();
+    let results =
+        ndxr::graph::search::hybrid_search(&conn, &graph, "validate", 10, None, None).unwrap();
 
     let capsule = build_capsule_with_budget(
         &conn,
@@ -230,7 +235,8 @@ fn capsule_pivot_file_paths_are_relative() {
     helpers::create_capsule_project(&tmp);
     let (config, conn, graph) = helpers::index_and_build(&tmp);
 
-    let results = ndxr::graph::search::hybrid_search(&conn, &graph, "auth", 10, None).unwrap();
+    let results =
+        ndxr::graph::search::hybrid_search(&conn, &graph, "auth", 10, None, None).unwrap();
 
     let capsule = build_capsule_with_budget(
         &conn,
@@ -337,7 +343,8 @@ fn relaxation_empty_query_returns_empty() {
     let (_config, conn, graph) = helpers::index_and_build(&tmp);
 
     let outcome =
-        ndxr::capsule::relaxation::search_with_relaxation(&conn, &graph, "", 10, None).unwrap();
+        ndxr::capsule::relaxation::search_with_relaxation(&conn, &graph, "", 10, None, None)
+            .unwrap();
 
     assert!(
         outcome.results.is_empty(),
@@ -353,7 +360,7 @@ fn relaxation_special_chars_only_returns_results() {
 
     // All special characters are stripped by build_fts_query, resulting in empty FTS query.
     let outcome =
-        ndxr::capsule::relaxation::search_with_relaxation(&conn, &graph, "(){}[]", 10, None)
+        ndxr::capsule::relaxation::search_with_relaxation(&conn, &graph, "(){}[]", 10, None, None)
             .unwrap();
 
     // After stripping special chars the query is empty, so relaxation cannot find anything.
@@ -372,7 +379,7 @@ fn impact_hints_isolated_symbol_is_low() {
 
     // Search for setupRoutes which has few callers/callees in this small project.
     let results =
-        ndxr::graph::search::hybrid_search(&conn, &graph, "setupRoutes", 5, None).unwrap();
+        ndxr::graph::search::hybrid_search(&conn, &graph, "setupRoutes", 5, None, None).unwrap();
     assert!(!results.is_empty(), "should find setupRoutes");
 
     let hints = ndxr::capsule::builder::generate_impact_hints(&graph, &results);
@@ -414,6 +421,8 @@ fn impact_hints_symbol_not_in_graph() {
             bm25: 0.5,
             tfidf: 0.5,
             centrality: 0.0,
+            ngram: 0.0,
+            semantic: 0.0,
             intent_boost: 0.0,
             intent: "explore".to_string(),
             matched_terms: vec![],

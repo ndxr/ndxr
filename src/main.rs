@@ -154,6 +154,12 @@ enum Commands {
         follow: bool,
     },
 
+    /// Manage the embedding model for semantic search.
+    Model {
+        #[command(subcommand)]
+        action: ModelAction,
+    },
+
     /// Upgrade ndxr to the latest release.
     #[command(
         long_about = "Upgrade ndxr to the latest release.\n\n\
@@ -176,6 +182,15 @@ enum Commands {
     },
 }
 
+/// Embedding model management actions.
+#[derive(Subcommand)]
+enum ModelAction {
+    /// Download the embedding model for semantic search.
+    Download,
+    /// Show embedding model status and coverage.
+    Status,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -193,6 +208,10 @@ fn main() -> Result<()> {
         }) => cmd_search(&query, limit, intent.as_deref(), explain),
         Some(Commands::Skeleton { files, docs }) => cmd_skeleton(&files, docs),
         Some(Commands::Activity { limit, follow }) => cmd_activity(limit, follow),
+        Some(Commands::Model { action }) => match action {
+            ModelAction::Download => cmd_model_download(),
+            ModelAction::Status => cmd_model_status(),
+        },
         Some(Commands::Upgrade { check, force }) => {
             if cmd_upgrade(check, force)? {
                 std::process::exit(1);
@@ -232,6 +251,9 @@ fn cmd_index(verbose: bool) -> Result<()> {
         "Symbols: {}  Edges: {}",
         stats.symbols_extracted, stats.edges_extracted
     );
+    if stats.embeddings_computed > 0 {
+        println!("Embeddings: {}", stats.embeddings_computed);
+    }
     if stats.observations_marked_stale > 0 {
         println!(
             "Observations marked stale: {}",
@@ -259,6 +281,9 @@ fn cmd_reindex(verbose: bool) -> Result<()> {
         "Symbols: {}  Edges: {}",
         stats.symbols_extracted, stats.edges_extracted
     );
+    if stats.embeddings_computed > 0 {
+        println!("Embeddings: {}", stats.embeddings_computed);
+    }
     if stats.observations_marked_stale > 0 {
         println!(
             "Observations marked stale: {}",
@@ -333,6 +358,8 @@ fn cmd_status(json: bool) -> Result<()> {
             "oldest_index_at": status.oldest_indexed_at,
             "newest_index_at": status.newest_indexed_at,
             "db_size_bytes": status.db_size_bytes,
+            "embeddings_count": status.embeddings_count,
+            "embeddings_model": status.embeddings_model,
             "workspace_root": config.workspace_root.display().to_string(),
         });
         println!(
@@ -356,6 +383,16 @@ fn cmd_status(json: bool) -> Result<()> {
         }
         println!("  Sessions:      {}", status.session_count);
         println!("  Observations:  {}", status.observation_count);
+        if status.embeddings_count > 0 {
+            if let Some(ref model) = status.embeddings_model {
+                println!(
+                    "  Embeddings:    {} (model: {model})",
+                    status.embeddings_count
+                );
+            } else {
+                println!("  Embeddings:    {}", status.embeddings_count);
+            }
+        }
         println!("  DB size:       {}", format_bytes(status.db_size_bytes));
         if let Some(newest) = status.newest_indexed_at {
             println!("  Last indexed:  {}", format_age(newest));
@@ -375,6 +412,11 @@ fn cmd_search(query: &str, limit: usize, intent_str: Option<&str>, explain: bool
     let graph = ndxr::graph::builder::build_graph(&conn)?;
     ndxr::graph::centrality::compute_and_store(&conn, &graph)?;
 
+    let models_dir = config.workspace_root.join(".ndxr").join("models");
+    let embeddings_model = ndxr::embeddings::model::ModelHandle::load(&models_dir)
+        .ok()
+        .flatten();
+
     let intent_override = intent_str.and_then(ndxr::graph::intent::parse_intent);
 
     let outcome = ndxr::capsule::relaxation::search_with_relaxation(
@@ -383,6 +425,7 @@ fn cmd_search(query: &str, limit: usize, intent_str: Option<&str>, explain: bool
         query,
         limit,
         intent_override,
+        embeddings_model.as_ref(),
     )?;
     let results = outcome.results;
 
@@ -438,6 +481,53 @@ fn cmd_skeleton(files: &[String], include_docs: bool) -> Result<()> {
         println!();
     }
 
+    Ok(())
+}
+
+/// Download the embedding model for semantic search.
+fn cmd_model_download() -> Result<()> {
+    let root = find_root()?;
+    let models_dir = root.join(".ndxr").join("models");
+    std::fs::create_dir_all(&models_dir)
+        .with_context(|| format!("create {}", models_dir.display()))?;
+    ndxr::embeddings::download::download_model(
+        &models_dir,
+        &ndxr::embeddings::download::DEFAULT_MODEL,
+    )?;
+    println!("Model ready at {}", models_dir.display());
+    Ok(())
+}
+
+/// Show embedding model status and coverage.
+fn cmd_model_status() -> Result<()> {
+    let root = find_root()?;
+    let models_dir = root.join(".ndxr").join("models");
+    let info = &ndxr::embeddings::download::DEFAULT_MODEL;
+    println!("Model: {}", info.name);
+    let verified = ndxr::embeddings::download::verify_model(&models_dir, info)?;
+    if verified {
+        println!("Status: downloaded");
+        println!("Path: {}", models_dir.display());
+        let config = ndxr::config::NdxrConfig::from_workspace(root);
+        if let Ok(conn) = ndxr::storage::db::open_or_create(&config.db_path)
+            && let Ok(status) = ndxr::status::collect_index_status(&conn, &config.db_path)
+        {
+            let emb_count = status.embeddings_count;
+            let sym_count = status.symbol_count;
+            if sym_count > 0 {
+                #[allow(clippy::cast_precision_loss)] // counts are small
+                #[allow(clippy::cast_possible_truncation)] // percentage 0..100 fits u32
+                #[allow(clippy::cast_sign_loss)] // percentage is non-negative
+                let pct = (emb_count as f64 / sym_count as f64 * 100.0) as u32;
+                println!("Embeddings: {emb_count}/{sym_count} symbols ({pct}%)");
+            } else {
+                println!("Embeddings: 0 (no symbols indexed)");
+            }
+        }
+    } else {
+        println!("Status: not downloaded");
+        println!("Run `ndxr model download` to enable semantic search.");
+    }
     Ok(())
 }
 
@@ -849,6 +939,7 @@ fn print_quick_start() {
     println!("  search     Search the index");
     println!("  skeleton   Show file skeletons (signatures only)");
     println!("  activity   Show recent MCP tool activity");
+    println!("  model      Manage the embedding model for semantic search");
     println!("  upgrade    Upgrade to the latest release");
     println!();
     println!("QUICK START:");

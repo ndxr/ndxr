@@ -1326,7 +1326,7 @@ fn e2e_search_ranks_exact_match_highest() {
 
     // Search for exact symbol name — it should be the top result.
     let results =
-        ndxr::graph::search::hybrid_search(&conn, &graph, "validateToken", 5, None).unwrap();
+        ndxr::graph::search::hybrid_search(&conn, &graph, "validateToken", 5, None, None).unwrap();
 
     assert!(!results.is_empty(), "should find results");
     assert_eq!(
@@ -1353,7 +1353,7 @@ fn e2e_search_docstring_matches_work() {
 
     // Search by docstring content — "connection pool manager".
     let results =
-        ndxr::graph::search::hybrid_search(&conn, &graph, "connection pool manager", 5, None)
+        ndxr::graph::search::hybrid_search(&conn, &graph, "connection pool manager", 5, None, None)
             .unwrap();
 
     assert!(
