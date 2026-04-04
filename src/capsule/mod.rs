@@ -169,6 +169,9 @@ pub struct CapsuleStats {
     pub intent: String,
     /// Whether auto-relaxation was applied during search.
     pub relaxation_applied: bool,
+    /// Explanation when the capsule contains no pivots (`None` when results exist).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_results_reason: Option<String>,
 }
 
 /// A complete context capsule.

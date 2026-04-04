@@ -1077,6 +1077,38 @@ struct PipelineParams<'a> {
     embeddings_model: Option<&'a crate::embeddings::model::ModelHandle>,
 }
 
+/// Sets `capsule.stats.no_results_reason` when the capsule contains no pivots.
+///
+/// Checks three conditions in priority order:
+/// 1. Index is empty (zero files in the database).
+/// 2. Search matched nothing (zero candidates evaluated).
+/// 3. Relaxation was applied but still empty.
+fn diagnose_empty_capsule(conn: &rusqlite::Connection, capsule: &mut crate::capsule::Capsule) {
+    if !capsule.pivots.is_empty() {
+        capsule.stats.no_results_reason = None;
+        return;
+    }
+
+    let file_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
+        .unwrap_or_else(|e| {
+            tracing::warn!("failed to count files for empty capsule diagnosis: {e}");
+            0
+        });
+
+    capsule.stats.no_results_reason = Some(if file_count == 0 {
+        "Index is empty \u{2014} call reindex or run 'ndxr index' from the CLI.".to_owned()
+    } else if capsule.stats.candidates_evaluated == 0 {
+        "No symbols matched the query. Try broader terms or check that relevant files are indexed."
+            .to_owned()
+    } else if capsule.stats.relaxation_applied {
+        "Query matched too few results even after auto-relaxation. Try different search terms."
+            .to_owned()
+    } else {
+        "No matching symbols found for the query.".to_owned()
+    });
+}
+
 /// Runs the shared capsule pipeline: search, build capsule, recall memories, populate stats.
 ///
 /// Used by both `run_pipeline` (which adds impact hints) and `get_context_capsule`.
@@ -1152,6 +1184,7 @@ fn run_capsule_pipeline(p: &PipelineParams<'_>) -> Result<PipelineResult, rmcp::
 
     enrich_recent_changes(p.conn, &mut capsule, &pivot_fqns, p.session_id);
     enrich_warnings(p.conn, &mut capsule, p.session_id);
+    diagnose_empty_capsule(p.conn, &mut capsule);
 
     Ok(PipelineResult {
         capsule,
@@ -1660,6 +1693,7 @@ mod tests {
                 search_time_ms: 5,
                 intent: "test".to_owned(),
                 relaxation_applied: false,
+                no_results_reason: None,
             },
         }
     }
@@ -1752,5 +1786,90 @@ mod tests {
                 .is_some_and(|c| c.contains("[trimmed"))
         });
         assert!(has_trimmed);
+    }
+
+    #[test]
+    fn no_results_reason_none_when_pivots_exist() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("test.db");
+        let conn = crate::storage::db::open_or_create(&db_path).unwrap();
+        let mut capsule = make_test_capsule(100);
+
+        diagnose_empty_capsule(&conn, &mut capsule);
+        assert!(
+            capsule.stats.no_results_reason.is_none(),
+            "no_results_reason should be None when pivots exist"
+        );
+    }
+
+    #[test]
+    fn no_results_reason_empty_index() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("test.db");
+        let conn = crate::storage::db::open_or_create(&db_path).unwrap();
+        let mut capsule = make_test_capsule(100);
+
+        // Clear pivots and candidates — empty index path
+        capsule.pivots.clear();
+        capsule.stats.candidates_evaluated = 0;
+        diagnose_empty_capsule(&conn, &mut capsule);
+
+        let reason = capsule.stats.no_results_reason.as_ref().unwrap();
+        assert!(
+            reason.contains("Index is empty"),
+            "expected 'Index is empty' reason, got: {reason}"
+        );
+    }
+
+    #[test]
+    fn no_results_reason_no_matches() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("test.db");
+        let conn = crate::storage::db::open_or_create(&db_path).unwrap();
+
+        // Insert a dummy file so the index is not empty
+        conn.execute(
+            "INSERT INTO files (path, blake3_hash, language, indexed_at) VALUES ('test.rs', 'abc', 'rust', 0)",
+            [],
+        )
+        .unwrap();
+
+        let mut capsule = make_test_capsule(100);
+        capsule.pivots.clear();
+        capsule.stats.candidates_evaluated = 0;
+        diagnose_empty_capsule(&conn, &mut capsule);
+
+        let reason = capsule.stats.no_results_reason.as_ref().unwrap();
+        assert!(
+            reason.contains("No symbols matched"),
+            "expected 'No symbols matched' reason, got: {reason}"
+        );
+    }
+
+    #[test]
+    fn no_results_reason_relaxation_fallback() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("test.db");
+        let conn = crate::storage::db::open_or_create(&db_path).unwrap();
+
+        // Insert a dummy file so the index is not empty
+        conn.execute(
+            "INSERT INTO files (path, blake3_hash, language, indexed_at) VALUES ('test.rs', 'abc', 'rust', 0)",
+            [],
+        )
+        .unwrap();
+
+        let mut capsule = make_test_capsule(100);
+        capsule.pivots.clear();
+        // Simulate: candidates were evaluated and relaxation was applied, but no pivots survived.
+        capsule.stats.candidates_evaluated = 5;
+        capsule.stats.relaxation_applied = true;
+        diagnose_empty_capsule(&conn, &mut capsule);
+
+        let reason = capsule.stats.no_results_reason.as_ref().unwrap();
+        assert!(
+            reason.contains("auto-relaxation"),
+            "expected 'auto-relaxation' reason, got: {reason}"
+        );
     }
 }

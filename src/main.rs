@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 /// Local-first context engine for AI coding agents.
@@ -77,8 +77,8 @@ enum Commands {
     )]
     Setup {
         /// Scope: 'project' writes .mcp.json in workspace, 'user' writes ~/.claude.json.
-        #[arg(long, default_value = "project")]
-        scope: String,
+        #[arg(long, value_enum, default_value_t = SetupScope::Project)]
+        scope: SetupScope,
     },
 
     /// Show index statistics.
@@ -191,14 +191,35 @@ enum ModelAction {
     Status,
 }
 
+/// Valid scopes for the setup command.
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum SetupScope {
+    /// Write .mcp.json in the workspace root.
+    Project,
+    /// Write to ~/.claude.json (user-wide).
+    User,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Initialize tracing for CLI commands. The MCP server has its own
+    // subscriber (stderr, no ANSI) — skip here to avoid double-init.
+    if !matches!(cli.command, Some(Commands::Mcp)) {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+            )
+            .with_writer(std::io::stderr)
+            .init();
+    }
 
     match cli.command {
         Some(Commands::Index { verbose }) => cmd_index(verbose),
         Some(Commands::Reindex { verbose }) => cmd_reindex(verbose),
         Some(Commands::Mcp) => cmd_mcp(),
-        Some(Commands::Setup { scope }) => cmd_setup(&scope),
+        Some(Commands::Setup { scope }) => cmd_setup(scope),
         Some(Commands::Status { json }) => cmd_status(json),
         Some(Commands::Search {
             query,
@@ -305,14 +326,18 @@ fn cmd_mcp() -> Result<()> {
 }
 
 /// Configure Claude Code integration for the workspace.
-fn cmd_setup(scope: &str) -> Result<()> {
+fn cmd_setup(scope: SetupScope) -> Result<()> {
     match scope {
-        "project" => setup_project_scope()?,
-        "user" => setup_user_scope()?,
-        other => bail!("unknown scope: {other}. Expected 'project' or 'user'."),
+        SetupScope::Project => setup_project_scope()?,
+        SetupScope::User => setup_user_scope()?,
     }
 
-    println!("ndxr setup complete (scope: {scope})");
+    let scope_name = match scope {
+        SetupScope::Project => "project",
+        SetupScope::User => "user",
+    };
+    println!("ndxr setup complete (scope: {scope_name})");
+    println!("Next: run 'ndxr index' to build the index.");
     Ok(())
 }
 
@@ -417,7 +442,16 @@ fn cmd_search(query: &str, limit: usize, intent_str: Option<&str>, explain: bool
         .ok()
         .flatten();
 
-    let intent_override = intent_str.and_then(ndxr::graph::intent::parse_intent);
+    let intent_override = intent_str.and_then(|s| {
+        ndxr::graph::intent::parse_intent(s).or_else(|| {
+            eprintln!(
+                "Warning: unknown intent '{s}'. \
+                 Valid: debug, test, refactor, modify, understand, explore. \
+                 Using auto-detection."
+            );
+            None
+        })
+    });
 
     let outcome = ndxr::capsule::relaxation::search_with_relaxation(
         &conn,
@@ -446,14 +480,19 @@ fn cmd_search(query: &str, limit: usize, intent_str: Option<&str>, explain: bool
         if explain {
             let w = &result.why;
             println!(
-                "   bm25={:.3} tfidf={:.3} centrality={:.3} boost={:.3} intent={}",
-                w.bm25, w.tfidf, w.centrality, w.intent_boost, w.intent
+                "   bm25={:.3} tfidf={:.3} centrality={:.3} ngram={:.3} semantic={:.3} boost={:.3} intent={}",
+                w.bm25, w.tfidf, w.centrality, w.ngram, w.semantic, w.intent_boost, w.intent
             );
             if !w.matched_terms.is_empty() {
                 println!("   matched: {}", w.matched_terms.join(", "));
             }
             println!("   reason: {}", w.reason);
         }
+    }
+
+    if outcome.relaxation_applied {
+        println!();
+        println!("Note: auto-relaxation was applied (original query matched too few results).");
     }
 
     Ok(())
@@ -946,8 +985,9 @@ fn print_quick_start() {
     println!("  1. cd your-project");
     println!("  2. ndxr setup              # writes .mcp.json + CLAUDE.md");
     println!("  3. ndxr index              # build the index");
-    println!("  4. ndxr status             # verify the index");
-    println!("  5. ndxr search \"auth flow\" # search the codebase");
+    println!("  4. ndxr model download     # (optional) enable semantic search");
+    println!("  5. ndxr status             # verify the index");
+    println!("  6. ndxr search \"auth flow\" # search the codebase");
     println!();
     println!("Run 'ndxr <command> --help' for detailed help on a command.");
 }

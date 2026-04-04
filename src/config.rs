@@ -9,7 +9,7 @@ use std::path::PathBuf;
 /// falling back to sensible defaults.
 #[derive(Debug, Clone)]
 pub struct NdxrConfig {
-    /// Absolute path to the workspace root (directory containing `.git/`).
+    /// Absolute path to the workspace root (directory containing `.git/` or `.ndxr/`).
     pub workspace_root: PathBuf,
     /// Path to the `.ndxr/` directory inside the workspace root.
     pub ndxr_dir: PathBuf,

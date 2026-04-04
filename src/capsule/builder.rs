@@ -124,6 +124,7 @@ pub fn build_capsule(req: &CapsuleRequest<'_>) -> Result<(Capsule, usize)> {
         search_time_ms: 0,
         intent: intent_name,
         relaxation_applied: false,
+        no_results_reason: None,
     };
 
     Ok((
