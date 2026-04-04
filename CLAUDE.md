@@ -281,6 +281,8 @@ Every `.rs` file follows this top-to-bottom order. **Never mix sections.**
 - **Clippy `too_many_arguments`** — not on the approved `#[allow]` list. Wrap parameters in a struct instead (see `CapsuleRequest`, `PipelineParams`)
 - **Clippy `case_sensitive_file_extension_comparisons`** — `.ends_with(".zip")` denied under pedantic. Use `Path::new(s).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))`
 - **Clippy `nonminimal_bool`** — `!x.is_some_and(|v| cond)` denied. Use `x.is_none_or(|v| !cond)` instead
+- **Clippy `single_match`** — `match opt { Some(x) => ..., None => ... }` denied under `clippy::all`. Use `if let` — but see `option_if_let_else` below when both arms produce `Option`
+- **Clippy `option_if_let_else`** — `if let Some(x) = opt { Some(x) } else { side_effect; None }` denied under nursery. `match` is also denied (`single_match`). Use `opt.or_else(|| { side_effect; None })` or `Option::map_or_else`
 - **Rustdoc private item links** — `[`PrivateConst`]` in a public function's doc creates an intra-doc link that warns because external consumers can't follow it. Use backtick-only notation (`` `PrivateConst` ``) for private items
 - **Duration vs timestamp in SQL** — never pass a duration constant directly as a `WHERE timestamp > ?` parameter. Compute `unix_now() - duration` at the call site or inside the function
 - **Warning dedup in both paths** — anti-pattern warnings are saved from both `enrich_warnings` (capsule pipeline) and `run_antipattern_detectors` (watcher). Both paths must deduplicate via `SELECT COUNT(*) ... LIKE '[rule]%'` before inserting
