@@ -15,7 +15,7 @@ use tract_onnx::prelude::*;
 pub const EMBEDDING_DIMENSION: usize = 384;
 
 /// Maximum texts per batch call.
-const EMBEDDING_BATCH_SIZE: usize = 32;
+pub(crate) const EMBEDDING_BATCH_SIZE: usize = 32;
 
 /// Input text is truncated to this many characters before tokenization.
 const MAX_EMBEDDING_INPUT_CHARS: usize = 512;
@@ -50,15 +50,17 @@ const _: () = {
 impl ModelHandle {
     /// Loads the embedding model from a directory.
     ///
-    /// Expects `model_quantized.onnx` and `tokenizer.json` inside
-    /// `models_dir`. Returns `Ok(None)` if either file is missing.
+    /// Expects `model.onnx` and `tokenizer.json` inside `models_dir` — the
+    /// filenames declared in [`crate::embeddings::download::DEFAULT_MODEL`].
+    /// Returns `Ok(None)` if either file is missing.
     ///
     /// # Errors
     ///
     /// Returns an error if model files exist but cannot be loaded or parsed.
     pub fn load(models_dir: &Path) -> Result<Option<Self>> {
-        let onnx_path = models_dir.join("model_quantized.onnx");
-        let tokenizer_path = models_dir.join("tokenizer.json");
+        let info = &crate::embeddings::download::DEFAULT_MODEL;
+        let onnx_path = models_dir.join(info.onnx_filename);
+        let tokenizer_path = models_dir.join(info.tokenizer_filename);
 
         if !onnx_path.exists() || !tokenizer_path.exists() {
             return Ok(None);
@@ -67,6 +69,8 @@ impl ModelHandle {
         #[allow(clippy::cast_possible_wrap)] // MAX_TOKEN_LENGTH=128, well within i64 range
         let seq_len = MAX_TOKEN_LENGTH as i64;
 
+        // BERT-style inputs: input_ids, attention_mask, token_type_ids —
+        // all shape [1, MAX_TOKEN_LENGTH], dtype i64.
         let plan = tract_onnx::onnx()
             .model_for_path(&onnx_path)
             .with_context(|| format!("failed to load ONNX model: {}", onnx_path.display()))?
@@ -74,6 +78,8 @@ impl ModelHandle {
             .context("failed to set input_ids fact")?
             .with_input_fact(1, i64::datum_type().fact([1, seq_len]).into())
             .context("failed to set attention_mask fact")?
+            .with_input_fact(2, i64::datum_type().fact([1, seq_len]).into())
+            .context("failed to set token_type_ids fact")?
             .into_optimized()
             .context("failed to optimize ONNX model")?
             .into_runnable()
@@ -131,11 +137,20 @@ impl ModelHandle {
         .context("failed to create attention_mask tensor")?
         .into_arc_tensor();
 
+        // token_type_ids: all zeros for single-sentence inputs (segment 0).
+        let token_type_tensor = tract_ndarray::Array2::<i64>::from_shape_vec(
+            (1, MAX_TOKEN_LENGTH),
+            vec![0i64; MAX_TOKEN_LENGTH],
+        )
+        .context("failed to create token_type_ids tensor")?
+        .into_arc_tensor();
+
         let outputs = self
             .model
             .run(tvec![
                 TValue::from_const(ids_tensor),
-                TValue::from_const(mask_tensor)
+                TValue::from_const(mask_tensor),
+                TValue::from_const(token_type_tensor),
             ])
             .context("ONNX inference failed")?;
 

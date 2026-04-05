@@ -48,14 +48,7 @@ impl FileWatcher {
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(256);
 
         // Create notify watcher that sends events to the channel.
-        let mut watcher = RecommendedWatcher::new(
-            move |result: Result<Event, notify::Error>| {
-                if let Ok(event) = result {
-                    let _ = event_tx.blocking_send(event);
-                }
-            },
-            notify::Config::default(),
-        )?;
+        let mut watcher = create_notify_watcher(event_tx)?;
 
         watcher.watch(&workspace_root, RecursiveMode::Recursive)?;
 
@@ -163,6 +156,29 @@ impl FileWatcher {
     pub fn shutdown(self) {
         let _ = self.shutdown_tx.send(());
     }
+}
+
+/// Creates a notify `RecommendedWatcher` that forwards events to `event_tx`.
+///
+/// Channel-full conditions and OS watcher errors are logged so the user can
+/// diagnose silent re-index failures instead of wondering why a file change
+/// never took effect.
+fn create_notify_watcher(event_tx: tokio::sync::mpsc::Sender<Event>) -> Result<RecommendedWatcher> {
+    Ok(RecommendedWatcher::new(
+        move |result: Result<Event, notify::Error>| match result {
+            Ok(event) => {
+                if event_tx.blocking_send(event).is_err() {
+                    tracing::warn!(
+                        "watcher event channel full — event dropped, some files may not be re-indexed"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!("filesystem watcher error: {e}");
+            }
+        },
+        notify::Config::default(),
+    )?)
 }
 
 /// Runs anti-pattern detectors against the most recent session.

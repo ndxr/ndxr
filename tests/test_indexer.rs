@@ -43,7 +43,7 @@ fn full_index_creates_symbols_and_edges() {
     create_ts_project(&tmp);
 
     let config = ndxr::config::NdxrConfig::from_workspace(tmp.path().canonicalize().unwrap());
-    let stats = ndxr::indexer::index(&config).unwrap();
+    let stats = ndxr::indexer::index(&config, None).unwrap();
 
     assert_eq!(stats.files_indexed, 2);
     assert!(
@@ -73,9 +73,9 @@ fn incremental_index_skips_unchanged() {
     create_ts_project(&tmp);
 
     let config = ndxr::config::NdxrConfig::from_workspace(tmp.path().canonicalize().unwrap());
-    ndxr::indexer::index(&config).unwrap();
+    ndxr::indexer::index(&config, None).unwrap();
 
-    let stats = ndxr::indexer::index(&config).unwrap();
+    let stats = ndxr::indexer::index(&config, None).unwrap();
     assert_eq!(stats.files_indexed, 0);
     assert_eq!(stats.skipped, 2);
 }
@@ -86,7 +86,7 @@ fn incremental_index_detects_changes() {
     create_ts_project(&tmp);
 
     let config = ndxr::config::NdxrConfig::from_workspace(tmp.path().canonicalize().unwrap());
-    ndxr::indexer::index(&config).unwrap();
+    ndxr::indexer::index(&config, None).unwrap();
 
     fs::write(
         tmp.path().join("src/greet.ts"),
@@ -98,7 +98,7 @@ export function greet(name: string): string {
     )
     .unwrap();
 
-    let stats = ndxr::indexer::index(&config).unwrap();
+    let stats = ndxr::indexer::index(&config, None).unwrap();
     assert_eq!(stats.files_indexed, 1);
     assert_eq!(stats.skipped, 1);
 }
@@ -109,8 +109,8 @@ fn reindex_clears_and_rebuilds() {
     create_ts_project(&tmp);
 
     let config = ndxr::config::NdxrConfig::from_workspace(tmp.path().canonicalize().unwrap());
-    ndxr::indexer::index(&config).unwrap();
-    let stats = ndxr::indexer::reindex(&config).unwrap();
+    ndxr::indexer::index(&config, None).unwrap();
+    let stats = ndxr::indexer::reindex(&config, None).unwrap();
 
     assert_eq!(stats.files_indexed, 2);
 }
@@ -121,7 +121,7 @@ fn tfidf_tables_populated_after_index() {
     create_ts_project(&tmp);
 
     let config = ndxr::config::NdxrConfig::from_workspace(tmp.path().canonicalize().unwrap());
-    ndxr::indexer::index(&config).unwrap();
+    ndxr::indexer::index(&config, None).unwrap();
 
     let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
     let tf_count: i64 = conn
@@ -143,7 +143,7 @@ fn fts5_populated_after_index() {
     create_ts_project(&tmp);
 
     let config = ndxr::config::NdxrConfig::from_workspace(tmp.path().canonicalize().unwrap());
-    ndxr::indexer::index(&config).unwrap();
+    ndxr::indexer::index(&config, None).unwrap();
 
     let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
     let fts_count: i64 = conn
@@ -344,7 +344,7 @@ fn index_empty_file_produces_no_symbols() {
     fs::write(tmp.path().join("empty.ts"), "").unwrap();
 
     let config = ndxr::config::NdxrConfig::from_workspace(tmp.path().canonicalize().unwrap());
-    let stats = ndxr::indexer::index(&config).unwrap();
+    let stats = ndxr::indexer::index(&config, None).unwrap();
 
     assert_eq!(stats.files_indexed, 1);
     assert_eq!(stats.symbols_extracted, 0);
@@ -358,12 +358,12 @@ fn incremental_index_detects_file_deletion() {
     fs::write(tmp.path().join("b.ts"), "export function b() {}").unwrap();
 
     let config = ndxr::config::NdxrConfig::from_workspace(tmp.path().canonicalize().unwrap());
-    ndxr::indexer::index(&config).unwrap();
+    ndxr::indexer::index(&config, None).unwrap();
 
     // Delete one file
     fs::remove_file(tmp.path().join("b.ts")).unwrap();
 
-    let stats = ndxr::indexer::index(&config).unwrap();
+    let stats = ndxr::indexer::index(&config, None).unwrap();
     assert_eq!(stats.files_deleted, 1);
     assert_eq!(stats.skipped, 1); // a.ts unchanged
 
@@ -393,7 +393,7 @@ fn index_paths_targeted_reindex() {
     fs::write(tmp.path().join("b.ts"), "export function b() {}").unwrap();
 
     let config = ndxr::config::NdxrConfig::from_workspace(tmp.path().canonicalize().unwrap());
-    ndxr::indexer::index(&config).unwrap();
+    ndxr::indexer::index(&config, None).unwrap();
 
     // Modify only b.ts
     fs::write(tmp.path().join("b.ts"), "export function b_new() {}").unwrap();
@@ -403,4 +403,68 @@ fn index_paths_targeted_reindex() {
     let stats = ndxr::indexer::index_paths(&config, &changed).unwrap();
     assert_eq!(stats.files_indexed, 1);
     // a.ts was not even checked since it wasn't in the changed paths
+}
+
+#[test]
+fn progress_callback_receives_stage_messages() {
+    use std::sync::Mutex;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(tmp.path().join(".git")).unwrap();
+    std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+    std::fs::write(
+        tmp.path().join("src/lib.rs"),
+        "pub fn hello() -> &'static str { \"hi\" }\n",
+    )
+    .unwrap();
+
+    let config = ndxr::config::NdxrConfig::from_workspace(tmp.path().canonicalize().unwrap());
+
+    let messages: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let callback = |msg: &str| {
+        messages.lock().unwrap().push(msg.to_owned());
+    };
+
+    let stats = ndxr::indexer::index(&config, Some(&callback)).unwrap();
+    assert!(stats.files_indexed > 0);
+
+    let msgs = messages.lock().unwrap();
+    let joined = msgs.join("\n");
+
+    assert!(
+        msgs.iter().any(|m| m.starts_with("Walking filesystem")),
+        "missing walking stage, got:\n{joined}"
+    );
+    assert!(
+        msgs.iter().any(|m| m.starts_with("Hashing files")),
+        "missing hashing stage, got:\n{joined}"
+    );
+    assert!(
+        msgs.iter().any(|m| m.starts_with("Parsing")),
+        "missing parsing stage, got:\n{joined}"
+    );
+    assert!(
+        msgs.iter().any(|m| m.starts_with("Writing to database")),
+        "missing DB write stage, got:\n{joined}"
+    );
+    assert!(
+        msgs.iter().any(|m| m.starts_with("Building graph")),
+        "missing graph build stage, got:\n{joined}"
+    );
+    assert!(
+        msgs.iter().any(|m| m.starts_with("Computing PageRank")),
+        "missing PageRank stage, got:\n{joined}"
+    );
+}
+
+#[test]
+fn index_with_none_callback_still_works() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(tmp.path().join(".git")).unwrap();
+    std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+    std::fs::write(tmp.path().join("src/lib.rs"), "pub fn hello() {}\n").unwrap();
+
+    let config = ndxr::config::NdxrConfig::from_workspace(tmp.path().canonicalize().unwrap());
+    let stats = ndxr::indexer::index(&config, None).unwrap();
+    assert!(stats.files_indexed > 0);
 }

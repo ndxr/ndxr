@@ -56,6 +56,9 @@ pub struct IndexStats {
 /// On first run, indexes all files. On subsequent runs, only processes
 /// files that have been added, changed, or deleted since the last index.
 ///
+/// The optional `on_progress` callback is invoked at each pipeline stage
+/// boundary with a human-readable message. Pass `None` for silent operation.
+///
 /// # Pipeline
 ///
 /// 1. Open/create database
@@ -66,15 +69,16 @@ pub struct IndexStats {
 /// 6. Write results to database in a single transaction
 /// 7. Compute TF-IDF term frequencies
 /// 8. Build dependency graph and compute `PageRank` centrality
-/// 9. Detect observation staleness for changed symbols
-/// 10. Return statistics
+/// 9. Compute embeddings for new/changed symbols (batch-by-batch)
+/// 10. Detect observation staleness for changed symbols
+/// 11. Return statistics
 ///
 /// # Errors
 ///
 /// Returns an error if the database cannot be opened, the filesystem walk
 /// fails, or the database write fails.
-pub fn index(config: &NdxrConfig) -> Result<IndexStats> {
-    index_inner(config, false)
+pub fn index(config: &NdxrConfig, on_progress: Option<&dyn Fn(&str)>) -> Result<IndexStats> {
+    index_inner(config, false, on_progress)
 }
 
 /// Shared implementation for [`index`] and [`reindex`].
@@ -82,33 +86,42 @@ pub fn index(config: &NdxrConfig) -> Result<IndexStats> {
 /// When `skip_changes` is `true`, the change detection pipeline (snapshot,
 /// diff, store, staleness) is skipped entirely. This avoids the noise of
 /// marking every symbol as "added" after a full `reset_code_tables()`.
-fn index_inner(config: &NdxrConfig, skip_changes: bool) -> Result<IndexStats> {
+fn index_inner(
+    config: &NdxrConfig,
+    skip_changes: bool,
+    on_progress: Option<&dyn Fn(&str)>,
+) -> Result<IndexStats> {
     let start = std::time::Instant::now();
     let mut stats = IndexStats::default();
+
+    let emit = |msg: &str| {
+        if let Some(cb) = on_progress {
+            cb(msg);
+        }
+    };
 
     // 1. Open/create DB.
     let conn = storage::db::open_or_create(&config.db_path)?;
 
     // 2. Walk filesystem.
+    emit("Walking filesystem...");
     let files = walker::walk_workspace(&config.workspace_root)?;
+    emit(&format!("Walking filesystem... {} files", files.len()));
 
     // 3. Read and hash all files in parallel, then diff against DB.
-    let current_files: Vec<(PathBuf, String, String)> = files
-        .par_iter()
-        .filter_map(|abs_path| {
-            let rel_path = abs_path.strip_prefix(&config.workspace_root).ok()?;
-            let bytes = std::fs::read(abs_path).ok()?;
-            let hash = blake3::hash(&bytes).to_hex().to_string();
-            let source = String::from_utf8(bytes).ok()?;
-            Some((rel_path.to_path_buf(), source, hash))
-        })
-        .collect();
+    let current_files = read_and_hash_files_parallel(&config.workspace_root, &files);
 
     let manifest_entries: Vec<(PathBuf, String)> = current_files
         .iter()
         .map(|(path, _, hash)| (path.clone(), hash.clone()))
         .collect();
     let diff = manifest::diff_files(&conn, &manifest_entries)?;
+
+    let (changed_count, deleted_count, unchanged_count) = count_file_statuses(&diff);
+    emit(&format!(
+        "Hashing files... {} files ({changed_count} changed, {deleted_count} deleted, {unchanged_count} unchanged)",
+        files.len()
+    ));
 
     // 4. Collect files to process, retaining their pre-read content.
     let changed_paths: std::collections::HashSet<PathBuf> = diff
@@ -138,12 +151,10 @@ fn index_inner(config: &NdxrConfig, skip_changes: bool) -> Result<IndexStats> {
         .map(|(path, _)| path.clone())
         .collect();
 
-    stats.skipped = diff
-        .iter()
-        .filter(|(_, s)| matches!(s, manifest::FileStatus::Unchanged))
-        .count();
+    stats.skipped = unchanged_count;
 
     // 5. Parse files in parallel using pre-read content.
+    emit(&format!("Parsing {} files...", to_parse.len()));
     let results = parser::parse_files_parallel_from_content(&config.workspace_root, to_parse);
     stats.files_indexed = results.len();
 
@@ -154,24 +165,24 @@ fn index_inner(config: &NdxrConfig, skip_changes: bool) -> Result<IndexStats> {
     let pre_index_symbols = if skip_changes {
         HashMap::new()
     } else {
-        let fqn_set: std::collections::HashSet<&str> = results
-            .iter()
-            .flat_map(|r| r.symbols.iter().map(|s| s.fqn.as_str()))
-            .collect();
-        let fqns: Vec<&str> = fqn_set.into_iter().collect();
-        let deleted_paths: Vec<String> = deleted
-            .iter()
-            .map(|p| crate::util::normalize_path(p))
-            .collect();
-        memory::changes::snapshot_symbol_state(&conn, &fqns, &deleted_paths)?
+        snapshot_pre_index(&conn, &results, &deleted)?
     };
 
     // 6. Write to DB in a single transaction.
+    emit("Writing to database...");
     let fqn_to_id = write_index_results(&conn, &results, &deleted, &diff, &mut stats)?;
 
     // 7. Post-index: build graph and compute PageRank.
     //    These run AFTER the transaction commits since PageRank reads from DB.
+    emit("Building graph...");
     let graph = graph::builder::build_graph(&conn)?;
+    emit(&format!(
+        "Building graph ({} nodes, {} edges)...",
+        graph.graph.node_count(),
+        graph.graph.edge_count()
+    ));
+
+    emit("Computing PageRank...");
     graph::centrality::compute_and_store(&conn, &graph)?;
     info!(
         nodes = graph.graph.node_count(),
@@ -181,7 +192,8 @@ fn index_inner(config: &NdxrConfig, skip_changes: bool) -> Result<IndexStats> {
 
     // 8. Compute embeddings for indexed symbols (skipped if model absent).
     let models_dir = config.workspace_root.join(".ndxr").join("models");
-    let embeddings_computed = compute_embeddings(&conn, &results, &fqn_to_id, &models_dir)?;
+    let embeddings_computed =
+        compute_embeddings(&conn, &results, &fqn_to_id, &models_dir, on_progress)?;
     if embeddings_computed > 0 {
         info!(count = embeddings_computed, "embeddings computed");
     }
@@ -189,28 +201,42 @@ fn index_inner(config: &NdxrConfig, skip_changes: bool) -> Result<IndexStats> {
 
     // 9. Detect observation staleness for changed symbols.
     if !skip_changes {
-        let reindexed_paths: Vec<String> = results
-            .iter()
-            .map(|r| crate::util::normalize_path(&r.path))
-            .collect();
-        let symbol_diffs =
-            memory::changes::detect_symbol_diffs(&conn, &pre_index_symbols, &reindexed_paths)?;
-        if !symbol_diffs.is_empty() {
-            memory::changes::store_symbol_changes(&conn, &symbol_diffs, None)?;
-            let marked = memory::staleness::detect_staleness(&conn, &symbol_diffs)?;
-            stats.observations_marked_stale = marked;
-            if marked > 0 {
-                info!(
-                    marked,
-                    changed = symbol_diffs.len(),
-                    "observations marked stale"
-                );
-            }
-        }
+        emit("Detecting staleness...");
+        stats.observations_marked_stale =
+            detect_and_mark_stale(&conn, &results, &pre_index_symbols)?;
     }
 
     stats.duration_ms = start.elapsed().as_millis();
     Ok(stats)
+}
+
+/// Detects which symbols changed between the pre-index snapshot and the
+/// current DB state, stores the diffs, and marks any observations that now
+/// reference stale symbol bodies. Returns the number of observations marked.
+fn detect_and_mark_stale(
+    conn: &rusqlite::Connection,
+    results: &[parser::ParseResult],
+    pre_index_symbols: &memory::changes::SymbolSnapshot,
+) -> Result<usize> {
+    let reindexed_paths: Vec<String> = results
+        .iter()
+        .map(|r| crate::util::normalize_path(&r.path))
+        .collect();
+    let symbol_diffs =
+        memory::changes::detect_symbol_diffs(conn, pre_index_symbols, &reindexed_paths)?;
+    if symbol_diffs.is_empty() {
+        return Ok(0);
+    }
+    memory::changes::store_symbol_changes(conn, &symbol_diffs, None)?;
+    let marked = memory::staleness::detect_staleness(conn, &symbol_diffs)?;
+    if marked > 0 {
+        info!(
+            marked,
+            changed = symbol_diffs.len(),
+            "observations marked stale"
+        );
+    }
+    Ok(marked)
 }
 
 /// Performs a targeted incremental index on a specific set of changed paths.
@@ -343,16 +369,79 @@ pub fn index_paths(config: &NdxrConfig, changed_paths: &[PathBuf]) -> Result<Ind
 /// Preserves session memory (sessions, observations, `observation_links`).
 /// Equivalent to dropping the code index and running [`index`] from scratch.
 ///
+/// The optional `on_progress` callback is invoked at each pipeline stage
+/// boundary with a human-readable message. Pass `None` for silent operation.
+///
 /// # Errors
 ///
 /// Returns an error if the database cannot be opened, tables cannot be
 /// reset, or the subsequent indexing fails.
-pub fn reindex(config: &NdxrConfig) -> Result<IndexStats> {
+pub fn reindex(config: &NdxrConfig, on_progress: Option<&dyn Fn(&str)>) -> Result<IndexStats> {
     let conn = storage::db::open_or_create(&config.db_path)?;
     storage::db::reset_code_tables(&conn)?;
     crate::embeddings::storage::clear_embeddings(&conn)?;
     drop(conn);
-    index_inner(config, true)
+    index_inner(config, true, on_progress)
+}
+
+/// Reads and hashes every walker-discovered file in parallel, returning the
+/// `(relative_path, source, blake3_hash)` tuple for each successful read.
+///
+/// Unreadable files are logged via `tracing::warn!` and skipped so that a
+/// single bad file cannot abort an indexing run.
+fn read_and_hash_files_parallel(
+    workspace_root: &std::path::Path,
+    files: &[PathBuf],
+) -> Vec<(PathBuf, String, String)> {
+    files
+        .par_iter()
+        .filter_map(|abs_path| {
+            let rel_path = abs_path.strip_prefix(workspace_root).ok()?;
+            let bytes = match std::fs::read(abs_path) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!("skipping unreadable file {}: {e}", abs_path.display());
+                    return None;
+                }
+            };
+            let hash = blake3::hash(&bytes).to_hex().to_string();
+            let source = String::from_utf8(bytes).ok()?;
+            Some((rel_path.to_path_buf(), source, hash))
+        })
+        .collect()
+}
+
+/// Single-pass tally of file status counts — returns `(changed, deleted, unchanged)`.
+///
+/// Avoids iterating `diff` three separate times just to build a progress string.
+fn count_file_statuses(diff: &[(PathBuf, manifest::FileStatus)]) -> (usize, usize, usize) {
+    diff.iter().fold(
+        (0_usize, 0_usize, 0_usize),
+        |(c, d, u), (_, status)| match status {
+            manifest::FileStatus::Added | manifest::FileStatus::Changed { .. } => (c + 1, d, u),
+            manifest::FileStatus::Deleted => (c, d + 1, u),
+            manifest::FileStatus::Unchanged => (c, d, u + 1),
+        },
+    )
+}
+
+/// Captures the pre-index symbol state so `detect_symbol_diffs` can diff it
+/// after the write transaction commits.
+fn snapshot_pre_index(
+    conn: &rusqlite::Connection,
+    results: &[parser::ParseResult],
+    deleted: &[PathBuf],
+) -> Result<memory::changes::SymbolSnapshot> {
+    let fqn_set: HashSet<&str> = results
+        .iter()
+        .flat_map(|r| r.symbols.iter().map(|s| s.fqn.as_str()))
+        .collect();
+    let fqns: Vec<&str> = fqn_set.into_iter().collect();
+    let deleted_paths: Vec<String> = deleted
+        .iter()
+        .map(|p| crate::util::normalize_path(p))
+        .collect();
+    memory::changes::snapshot_symbol_state(conn, &fqns, &deleted_paths)
 }
 
 /// Writes parse results and deletions to the database in a single transaction.
@@ -497,11 +586,14 @@ fn write_index_results(
 ///
 /// Loads the embedding model from `.ndxr/models/`. If the model is not
 /// present, returns 0 (silently skips). Uses batch inference for efficiency.
+/// When `on_progress` is `Some`, emits a message for each batch of
+/// `EMBEDDING_BATCH_SIZE` symbols.
 fn compute_embeddings(
     conn: &rusqlite::Connection,
     results: &[parser::ParseResult],
     fqn_to_id: &HashMap<String, i64>,
     models_dir: &std::path::Path,
+    on_progress: Option<&dyn Fn(&str)>,
 ) -> Result<usize> {
     let Some(model) = crate::embeddings::model::ModelHandle::load(models_dir)? else {
         return Ok(0);
@@ -525,12 +617,28 @@ fn compute_embeddings(
         return Ok(0);
     }
 
-    let texts: Vec<&str> = items.iter().map(|(_, t)| t.as_str()).collect();
-    let embeddings = model.embed_batch(&texts)?;
-    let entries: Vec<(i64, &[f32])> = items
+    // Chunk items into EMBEDDING_BATCH_SIZE groups for per-batch progress.
+    let batch_size = crate::embeddings::model::EMBEDDING_BATCH_SIZE;
+    let total_batches = items.len().div_ceil(batch_size);
+    let mut all_entries: Vec<(i64, Vec<f32>)> = Vec::with_capacity(items.len());
+
+    for (batch_idx, chunk) in items.chunks(batch_size).enumerate() {
+        if let Some(cb) = on_progress {
+            cb(&format!(
+                "Computing embeddings (batch {}/{total_batches})...",
+                batch_idx + 1
+            ));
+        }
+        let texts: Vec<&str> = chunk.iter().map(|(_, t)| t.as_str()).collect();
+        let embeddings = model.embed_batch(&texts)?;
+        for ((id, _), emb) in chunk.iter().zip(embeddings.into_iter()) {
+            all_entries.push((*id, emb));
+        }
+    }
+
+    let entries: Vec<(i64, &[f32])> = all_entries
         .iter()
-        .zip(embeddings.iter())
-        .map(|((id, _), emb)| (*id, emb.as_slice()))
+        .map(|(id, emb)| (*id, emb.as_slice()))
         .collect();
 
     crate::embeddings::storage::store_embeddings(

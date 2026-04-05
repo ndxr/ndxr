@@ -33,6 +33,8 @@ pub struct IndexStatus {
     pub embeddings_count: i64,
     /// Name of the embedding model used, if any.
     pub embeddings_model: Option<String>,
+    /// Current schema migration version applied to the database.
+    pub schema_version: i64,
 }
 
 /// Collects index health statistics from the database.
@@ -86,6 +88,14 @@ pub fn collect_index_status(conn: &Connection, db_path: &Path) -> Result<IndexSt
         Err(e) => return Err(e).context("failed to query embedding model name"),
     };
 
+    let schema_version: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )
+        .context("failed to query schema version")?;
+
     Ok(IndexStatus {
         file_count,
         symbol_count,
@@ -97,5 +107,6 @@ pub fn collect_index_status(conn: &Connection, db_path: &Path) -> Result<IndexSt
         db_size_bytes,
         embeddings_count,
         embeddings_model,
+        schema_version,
     })
 }

@@ -125,12 +125,15 @@ fn search_memory_finds_relevant() {
 
     let results = ndxr::memory::search::search_memories(
         &conn,
-        "JWT authentication",
-        &[],
-        10,
-        true,
-        7.0,
-        None,
+        &ndxr::memory::search::MemorySearchQuery {
+            query: "JWT authentication",
+            pivot_fqns: &[],
+            limit: 10,
+            include_stale: true,
+            recency_half_life_days: 7.0,
+            kind: None,
+            exclude_auto: false,
+        },
     )
     .unwrap();
     assert!(!results.is_empty());
@@ -143,8 +146,19 @@ fn search_memory_empty_query_returns_empty() {
     let (_tmp, config) = helpers::setup_indexed_workspace();
     let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
 
-    let results =
-        ndxr::memory::search::search_memories(&conn, "", &[], 10, true, 7.0, None).unwrap();
+    let results = ndxr::memory::search::search_memories(
+        &conn,
+        &ndxr::memory::search::MemorySearchQuery {
+            query: "",
+            pivot_fqns: &[],
+            limit: 10,
+            include_stale: true,
+            recency_half_life_days: 7.0,
+            kind: None,
+            exclude_auto: false,
+        },
+    )
+    .unwrap();
     assert!(results.is_empty());
 }
 
@@ -180,12 +194,15 @@ fn search_memory_excludes_stale_when_requested() {
     // Excluding stale should return nothing.
     let results = ndxr::memory::search::search_memories(
         &conn,
-        "JWT authentication",
-        &[],
-        10,
-        false,
-        7.0,
-        None,
+        &ndxr::memory::search::MemorySearchQuery {
+            query: "JWT authentication",
+            pivot_fqns: &[],
+            limit: 10,
+            include_stale: false,
+            recency_half_life_days: 7.0,
+            kind: None,
+            exclude_auto: false,
+        },
     )
     .unwrap();
     assert!(results.is_empty());
@@ -193,12 +210,15 @@ fn search_memory_excludes_stale_when_requested() {
     // Including stale should find it.
     let results = ndxr::memory::search::search_memories(
         &conn,
-        "JWT authentication",
-        &[],
-        10,
-        true,
-        7.0,
-        None,
+        &ndxr::memory::search::MemorySearchQuery {
+            query: "JWT authentication",
+            pivot_fqns: &[],
+            limit: 10,
+            include_stale: true,
+            recency_half_life_days: 7.0,
+            kind: None,
+            exclude_auto: false,
+        },
     )
     .unwrap();
     assert!(!results.is_empty());
@@ -498,8 +518,19 @@ fn search_memory_with_empty_database() {
     let conn = ndxr::storage::db::open_or_create(&db_path).unwrap();
 
     // No sessions, no observations -- search should return empty
-    let results =
-        ndxr::memory::search::search_memories(&conn, "anything", &[], 10, true, 7.0, None).unwrap();
+    let results = ndxr::memory::search::search_memories(
+        &conn,
+        &ndxr::memory::search::MemorySearchQuery {
+            query: "anything",
+            pivot_fqns: &[],
+            limit: 10,
+            include_stale: true,
+            recency_half_life_days: 7.0,
+            kind: None,
+            exclude_auto: false,
+        },
+    )
+    .unwrap();
     assert!(results.is_empty());
 }
 
@@ -535,4 +566,91 @@ fn staleness_with_unlinked_observation() {
     }];
     let marked = ndxr::memory::staleness::detect_staleness(&conn, &changed).unwrap();
     assert_eq!(marked, 0, "unlinked observation should not be marked stale");
+}
+
+#[test]
+fn search_memories_excludes_auto_by_default() {
+    use ndxr::memory::store::{NewObservation, create_session, save_observation};
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("test.db");
+    let conn = ndxr::storage::db::open_or_create(&db_path).unwrap();
+    let session_id = create_session(&conn).unwrap();
+
+    // Save one auto observation and one insight, both mentioning "validateToken"
+    save_observation(
+        &conn,
+        &NewObservation {
+            session_id: session_id.clone(),
+            kind: "auto".to_owned(),
+            content: "Tool: run_pipeline about validateToken".to_owned(),
+            headline: None,
+            detail_level: 3,
+            linked_fqns: vec![],
+        },
+    )
+    .unwrap();
+
+    save_observation(
+        &conn,
+        &NewObservation {
+            session_id: session_id.clone(),
+            kind: "insight".to_owned(),
+            content: "Important insight about validateToken and JWT".to_owned(),
+            headline: None,
+            detail_level: 3,
+            linked_fqns: vec![],
+        },
+    )
+    .unwrap();
+
+    // Default (exclude_auto=true) should only surface the insight.
+    let results = ndxr::memory::search::search_memories(
+        &conn,
+        &ndxr::memory::search::MemorySearchQuery {
+            query: "validateToken",
+            pivot_fqns: &[],
+            limit: 10,
+            include_stale: false,
+            recency_half_life_days: 7.0,
+            kind: None,
+            exclude_auto: true,
+        },
+    )
+    .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].observation.kind, "insight");
+
+    // exclude_auto=false should surface both.
+    let results_all = ndxr::memory::search::search_memories(
+        &conn,
+        &ndxr::memory::search::MemorySearchQuery {
+            query: "validateToken",
+            pivot_fqns: &[],
+            limit: 10,
+            include_stale: false,
+            recency_half_life_days: 7.0,
+            kind: None,
+            exclude_auto: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(results_all.len(), 2);
+
+    // kind='auto' with exclude_auto=false should surface only auto.
+    let results_auto = ndxr::memory::search::search_memories(
+        &conn,
+        &ndxr::memory::search::MemorySearchQuery {
+            query: "validateToken",
+            pivot_fqns: &[],
+            limit: 10,
+            include_stale: false,
+            recency_half_life_days: 7.0,
+            kind: Some("auto"),
+            exclude_auto: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(results_auto.len(), 1);
+    assert_eq!(results_auto[0].observation.kind, "auto");
 }

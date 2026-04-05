@@ -130,6 +130,8 @@ struct MemorySearchResult {
     session_id: String,
     /// Unix timestamp of creation.
     created_at: i64,
+    /// Human-readable relative time (e.g. "2m ago").
+    created_at_human: String,
     /// Relevance score.
     score: f64,
     /// Whether the observation is stale.
@@ -145,8 +147,12 @@ struct SessionDetail {
     id: String,
     /// Unix timestamp when the session started.
     started_at: i64,
+    /// Human-readable relative time since session start.
+    started_at_human: String,
     /// Unix timestamp of most recent activity.
     last_active: i64,
+    /// Human-readable relative time since most recent activity.
+    last_active_human: String,
     /// Whether this session has been compressed.
     is_compressed: bool,
     /// Compression summary.
@@ -174,6 +180,8 @@ struct ObservationDetail {
     is_stale: bool,
     /// Unix timestamp of creation.
     created_at: i64,
+    /// Human-readable relative time since creation.
+    created_at_human: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -254,7 +262,9 @@ struct GetSkeletonParams {
 /// Parameters for the `get_impact_graph` tool.
 #[derive(Deserialize, JsonSchema)]
 struct GetImpactGraphParams {
-    /// Fully qualified symbol name to analyze.
+    /// Fully qualified symbol name to analyze (e.g. `crate::module::function`).
+    /// Must be an exact FQN as returned in `run_pipeline` results — short names
+    /// are not supported.
     symbol_fqn: String,
     /// Maximum BFS traversal depth (default: 3, max: 10).
     depth: Option<usize>,
@@ -282,6 +292,8 @@ struct SearchMemoryParams {
 struct SaveObservationParams {
     /// Observation content text.
     content: String,
+    /// Optional short summary (shown in session context listings).
+    headline: Option<String>,
     /// Observation kind: insight, decision, error, or manual (default: "manual").
     kind: Option<String>,
     /// Fully-qualified symbol names to link to this observation.
@@ -327,7 +339,7 @@ impl NdxrServer {
     /// Full pipeline: detect intent, search, build capsule, recall memory,
     /// generate impact hints, auto-capture, and return JSON.
     #[tool(
-        description = "Run the full ndxr pipeline: search the codebase, build a context capsule with full source for pivots and skeletons for adjacent files, recall relevant memories, and generate impact hints. Optionally pass intent to optimize results (debug, test, refactor, modify, understand, explore). Returns a comprehensive JSON context package."
+        description = "Primary context tool — call this FIRST for every task. Searches the codebase, builds a context capsule with full source for top-matching files and signature skeletons for related files, recalls relevant session memories, and generates impact hints showing blast radius. Pass 'intent' to optimize: debug, test, refactor, modify, understand, explore."
     )]
     async fn run_pipeline(
         &self,
@@ -339,9 +351,12 @@ impl NdxrServer {
         let conn_guard = self.engine.conn.lock().await;
         let graph_guard = self.engine.graph.read().await;
 
-        let graph_ref = graph_guard
-            .as_ref()
-            .ok_or_else(|| rmcp::ErrorData::internal_error("symbol graph not initialized", None))?;
+        let graph_ref = graph_guard.as_ref().ok_or_else(|| {
+            rmcp::ErrorData::internal_error(
+                "symbol graph not initialized — try calling reindex to rebuild",
+                None,
+            )
+        })?;
 
         let intent = params
             .0
@@ -396,7 +411,7 @@ impl NdxrServer {
 
     /// Search the codebase and build a context capsule (no impact hints).
     #[tool(
-        description = "Search the codebase and build a context capsule with pivot files (full source) and skeleton files (signatures only). Includes memory recall. Optionally pass intent to optimize results (debug, test, refactor, modify, understand, explore). Does not generate impact hints. Returns JSON."
+        description = "Lightweight follow-up context search. Same as run_pipeline but without impact hints. Use this for additional queries after the initial run_pipeline call."
     )]
     async fn get_context_capsule(
         &self,
@@ -409,9 +424,12 @@ impl NdxrServer {
         let conn_guard = self.engine.conn.lock().await;
         let graph_guard = self.engine.graph.read().await;
 
-        let graph_ref = graph_guard
-            .as_ref()
-            .ok_or_else(|| rmcp::ErrorData::internal_error("symbol graph not initialized", None))?;
+        let graph_ref = graph_guard.as_ref().ok_or_else(|| {
+            rmcp::ErrorData::internal_error(
+                "symbol graph not initialized — try calling reindex to rebuild",
+                None,
+            )
+        })?;
 
         let intent = intent_override.unwrap_or_else(|| intent::detect_intent(query));
 
@@ -518,9 +536,12 @@ impl NdxrServer {
         let conn_guard = self.engine.conn.lock().await;
         let graph_guard = self.engine.graph.read().await;
 
-        let graph_ref = graph_guard
-            .as_ref()
-            .ok_or_else(|| rmcp::ErrorData::internal_error("symbol graph not initialized", None))?;
+        let graph_ref = graph_guard.as_ref().ok_or_else(|| {
+            rmcp::ErrorData::internal_error(
+                "symbol graph not initialized — try calling reindex to rebuild",
+                None,
+            )
+        })?;
 
         let sym_id: i64 = conn_guard
             .query_row("SELECT id FROM symbols WHERE fqn = ?1", [fqn], |row| {
@@ -596,7 +617,7 @@ impl NdxrServer {
 
     /// Search session memory for relevant observations.
     #[tool(
-        description = "Search session memory for relevant observations using hybrid scoring (BM25 + TF-IDF + recency + symbol proximity). No auto-capture is performed."
+        description = "Search session memory for relevant observations using hybrid scoring (BM25 + TF-IDF + recency + symbol proximity). By default excludes auto-captured tool call logs — pass kind: 'auto' to include them. No auto-capture is performed."
     )]
     async fn search_memory(
         &self,
@@ -612,20 +633,28 @@ impl NdxrServer {
 
         let conn_guard = self.engine.conn.lock().await;
 
+        // When no explicit kind is passed, exclude auto-captured tool call logs
+        // so they do not crowd out meaningful insights/decisions.
+        let exclude_auto = params.0.kind.is_none();
+
         let results = mem_search::search_memories(
             &conn_guard,
-            query,
-            &[],
-            limit,
-            include_stale,
-            self.engine.config.recency_half_life_days,
-            params.0.kind.as_deref(),
+            &mem_search::MemorySearchQuery {
+                query,
+                pivot_fqns: &[],
+                limit,
+                include_stale,
+                recency_half_life_days: self.engine.config.recency_half_life_days,
+                kind: params.0.kind.as_deref(),
+                exclude_auto,
+            },
         )
         .map_err(|e| {
             tracing::error!("memory search failed: {e}");
             rmcp::ErrorData::internal_error("failed to search memory", None)
         })?;
 
+        let now = crate::util::unix_now();
         let output: Vec<MemorySearchResult> = results
             .into_iter()
             .map(|m| MemorySearchResult {
@@ -633,6 +662,7 @@ impl NdxrServer {
                 content: m.observation.content,
                 kind: m.observation.kind,
                 session_id: m.observation.session_id,
+                created_at_human: format_relative_time(now, m.observation.created_at),
                 created_at: m.observation.created_at,
                 score: m.memory_score,
                 is_stale: m.observation.is_stale,
@@ -647,12 +677,18 @@ impl NdxrServer {
 
     /// Save a manual observation to session memory.
     #[tool(
-        description = "Save an observation to session memory. Observations persist across sessions and are surfaced in future context queries. Use this to record decisions, insights, or important context. No auto-capture is performed."
+        description = "Save an observation to session memory. Observations persist across sessions and are surfaced in future context queries. Valid kinds: insight, decision, error, manual (default: manual). Use headline for a compact summary."
     )]
     async fn save_observation(
         &self,
         params: Parameters<SaveObservationParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if params.0.content.trim().is_empty() {
+            return Err(rmcp::ErrorData::invalid_params(
+                "content must not be empty",
+                None,
+            ));
+        }
         if params.0.content.len() > MAX_OBSERVATION_CONTENT {
             return Err(rmcp::ErrorData::invalid_params(
                 format!("content exceeds maximum size of {MAX_OBSERVATION_CONTENT} bytes"),
@@ -680,7 +716,7 @@ impl NdxrServer {
             session_id: self.session_id.clone(),
             kind: kind.to_owned(),
             content: params.0.content.clone(),
-            headline: None,
+            headline: params.0.headline.clone(),
             detail_level: 3,
             linked_fqns: linked,
         };
@@ -727,6 +763,7 @@ impl NdxrServer {
                 rmcp::ErrorData::internal_error("failed to retrieve session context", None)
             })?;
 
+        let now = crate::util::unix_now();
         let mut result = Vec::new();
         for session in sessions {
             let observations = store::get_session_observations(&conn_guard, &session.id)
@@ -744,13 +781,16 @@ impl NdxrServer {
                     content: obs.content,
                     headline: obs.headline,
                     is_stale: obs.is_stale,
+                    created_at_human: format_relative_time(now, obs.created_at),
                     created_at: obs.created_at,
                 })
                 .collect();
 
             result.push(SessionDetail {
                 id: session.id,
+                started_at_human: format_relative_time(now, session.started_at),
                 started_at: session.started_at,
+                last_active_human: format_relative_time(now, session.last_active),
                 last_active: session.last_active,
                 is_compressed: session.is_compressed,
                 summary: session.summary,
@@ -789,6 +829,15 @@ impl NdxrServer {
 
         drop(conn_guard);
 
+        let now = crate::util::unix_now();
+        let oldest_human = status
+            .oldest_indexed_at
+            .map(|t| format_relative_time(now, t));
+        let newest_human = status
+            .newest_indexed_at
+            .map(|t| format_relative_time(now, t));
+        let is_stale = status.newest_indexed_at.is_none_or(|t| (now - t) > 3600);
+
         let result = serde_json::json!({
             "files": status.file_count,
             "symbols": status.symbol_count,
@@ -796,7 +845,10 @@ impl NdxrServer {
             "observations": status.observation_count,
             "sessions": status.session_count,
             "oldest_index_at": status.oldest_indexed_at,
+            "oldest_index_human": oldest_human,
             "newest_index_at": status.newest_indexed_at,
+            "newest_index_human": newest_human,
+            "is_stale": is_stale,
             "db_size_bytes": status.db_size_bytes,
             "embeddings_count": status.embeddings_count,
             "embeddings_model": status.embeddings_model,
@@ -821,9 +873,12 @@ impl NdxrServer {
         let conn_guard = self.engine.conn.lock().await;
         let graph_guard = self.engine.graph.read().await;
 
-        let graph_ref = graph_guard
-            .as_ref()
-            .ok_or_else(|| rmcp::ErrorData::internal_error("symbol graph not initialized", None))?;
+        let graph_ref = graph_guard.as_ref().ok_or_else(|| {
+            rmcp::ErrorData::internal_error(
+                "symbol graph not initialized — try calling reindex to rebuild",
+                None,
+            )
+        })?;
 
         let result =
             crate::graph::pathfinding::find_paths(&conn_guard, graph_ref, from, to, max_paths)
@@ -854,13 +909,11 @@ impl NdxrServer {
 
     /// Force a full re-index of the workspace and rebuild the symbol graph.
     #[tool(
-        description = "Force a full re-index of the workspace. Clears and rebuilds the entire index \
-                       and symbol graph. Use when the index is stale after a git checkout, branch switch, \
-                       or large external change. Preserves session memory. No auto-capture is performed."
+        description = "Force a full re-index of the workspace. The file watcher handles small changes automatically — only use reindex after git checkout, branch switch, or large external changes. Clears and rebuilds the entire index and symbol graph. Preserves session memory. No auto-capture is performed."
     )]
     async fn reindex(&self) -> Result<CallToolResult, rmcp::ErrorData> {
         let engine = self.engine.clone();
-        let result = tokio::task::spawn_blocking(move || indexer::reindex(&engine.config))
+        let result = tokio::task::spawn_blocking(move || indexer::reindex(&engine.config, None))
             .await
             .map_err(|e| {
                 tracing::error!("reindex task panicked: {e}");
@@ -951,7 +1004,7 @@ pub async fn start_mcp_server(config: NdxrConfig) -> Result<()> {
     if file_count == 0 {
         info!("no files indexed — running initial index");
         drop(conn);
-        indexer::index(&config)?;
+        indexer::index(&config, None)?;
     } else {
         drop(conn);
     }
@@ -1135,7 +1188,10 @@ fn run_capsule_pipeline(p: &PipelineParams<'_>) -> Result<PipelineResult, rmcp::
         Some(p.intent),
         p.embeddings_model,
     )
-    .map_err(|e| rmcp::ErrorData::internal_error(format!("search failed: {e}"), None))?;
+    .map_err(|e| {
+        tracing::error!("search failed: {e}");
+        rmcp::ErrorData::internal_error("search failed", None)
+    })?;
     let search_time_ms = search_start.elapsed().as_millis();
     let results = outcome.results;
     let relaxation_applied = outcome.relaxation_applied;
@@ -1151,20 +1207,28 @@ fn run_capsule_pipeline(p: &PipelineParams<'_>) -> Result<PipelineResult, rmcp::
         estimator: &estimator,
         workspace_root: p.workspace_root,
     };
-    let (mut capsule, memory_budget) = builder::build_capsule(&req)
-        .map_err(|e| rmcp::ErrorData::internal_error(format!("capsule build failed: {e}"), None))?;
+    let (mut capsule, memory_budget) = builder::build_capsule(&req).map_err(|e| {
+        tracing::error!("capsule build failed: {e}");
+        rmcp::ErrorData::internal_error("capsule build failed", None)
+    })?;
 
     let pivot_fqns: Vec<String> = results.iter().map(|r| r.fqn.clone()).collect();
     let memories = mem_search::search_memories(
         p.conn,
-        p.query,
-        &pivot_fqns,
-        DEFAULT_MEMORY_LIMIT,
-        false,
-        p.recency_half_life_days,
-        None,
+        &mem_search::MemorySearchQuery {
+            query: p.query,
+            pivot_fqns: &pivot_fqns,
+            limit: DEFAULT_MEMORY_LIMIT,
+            include_stale: false,
+            recency_half_life_days: p.recency_half_life_days,
+            kind: None,
+            exclude_auto: true,
+        },
     )
-    .map_err(|e| rmcp::ErrorData::internal_error(format!("memory search failed: {e}"), None))?;
+    .map_err(|e| {
+        tracing::error!("memory search failed: {e}");
+        rmcp::ErrorData::internal_error("memory search failed", None)
+    })?;
 
     let mut tokens_memories = 0;
     for memory in &memories {
@@ -1332,9 +1396,11 @@ fn serialize_capsule(c: &crate::capsule::Capsule) -> Result<String, rmcp::ErrorD
 /// Progressively trims a capsule until its compact JSON fits within the token budget.
 ///
 /// Trimming order (least valuable first):
-/// 1. Drop `warnings` and `recent_changes`.
-/// 2. Drop skeletons tail-first (highest `expansion_depth` first).
-/// 3. Replace `content` on lower-ranked pivot files with a placeholder.
+/// 1. Drop skeletons tail-first (highest `expansion_depth` first). Skeletons are
+///    supplementary BFS-expanded neighbors.
+/// 2. Drop memories. Useful but less urgent than active anti-pattern warnings.
+/// 3. Drop `warnings` and `recent_changes`. Compact, high-signal — dropped late.
+/// 4. Replace `content` on lower-ranked pivot files with a placeholder.
 ///
 /// Skipped entirely when `unlimited` is true.
 ///
@@ -1370,7 +1436,35 @@ fn trim_capsule_to_budget(
         "capsule exceeds budget, trimming"
     );
 
-    // Phase 1: drop warnings and recent_changes
+    // Phase 1: drop skeletons tail-first (highest expansion_depth first).
+    if !capsule.skeletons.is_empty() {
+        capsule
+            .skeletons
+            .sort_by(|a, b| b.expansion_depth.cmp(&a.expansion_depth));
+        while !capsule.skeletons.is_empty() {
+            capsule.skeletons.pop();
+            capsule.stats.skeleton_files = capsule.skeletons.len();
+            capsule.stats.skeleton_count = capsule.skeletons.iter().map(|s| s.symbols.len()).sum();
+            let json = serialize_capsule(capsule)?;
+            if json.len() <= max_chars {
+                return Ok(json);
+            }
+        }
+    }
+
+    // Phase 2: drop memories.
+    if !capsule.memories.is_empty() {
+        capsule.memories.clear();
+        capsule.stats.memory_count = 0;
+        capsule.stats.tokens_memories = 0;
+        capsule.stats.tokens_used = capsule.stats.tokens_pivots + capsule.stats.tokens_skeletons;
+        let json = serialize_capsule(capsule)?;
+        if json.len() <= max_chars {
+            return Ok(json);
+        }
+    }
+
+    // Phase 3: drop warnings and recent_changes.
     if !capsule.warnings.is_empty() || !capsule.recent_changes.is_empty() {
         capsule.warnings.clear();
         capsule.recent_changes.clear();
@@ -1380,21 +1474,7 @@ fn trim_capsule_to_budget(
         }
     }
 
-    // Phase 2: drop skeletons tail-first (highest expansion_depth first)
-    capsule
-        .skeletons
-        .sort_by(|a, b| b.expansion_depth.cmp(&a.expansion_depth));
-    while !capsule.skeletons.is_empty() {
-        capsule.skeletons.pop();
-        capsule.stats.skeleton_files = capsule.skeletons.len();
-        capsule.stats.skeleton_count = capsule.skeletons.iter().map(|s| s.symbols.len()).sum();
-        let json = serialize_capsule(capsule)?;
-        if json.len() <= max_chars {
-            return Ok(json);
-        }
-    }
-
-    // Phase 3: truncate pivot content (lowest-scored first)
+    // Phase 4: truncate pivot content (lowest-scored first).
     capsule.pivots.sort_by(|a, b| {
         let score_a = a.symbols.first().map_or(0.0, |s| s.score);
         let score_b = b.symbols.first().map_or(0.0, |s| s.score);
@@ -1408,7 +1488,6 @@ fn trim_capsule_to_budget(
             continue;
         }
         "[trimmed -- use get_skeleton for this file]".clone_into(&mut capsule.pivots[i].content);
-        // Recalculate pivot token stats after trimming content
         capsule.stats.tokens_pivots = capsule
             .pivots
             .iter()
@@ -1718,74 +1797,188 @@ mod tests {
     }
 
     #[test]
-    fn trim_phase1_drops_warnings() {
+    fn trim_phase1_drops_skeletons_before_warnings() {
+        // With a budget just small enough to need trimming, skeletons should
+        // go first (Phase 1) while warnings and recent_changes survive.
         let mut capsule = make_test_capsule(100);
-        // Set budget so capsule just barely exceeds it with warnings but fits without
-        let json_with_warnings = serde_json::to_string(&capsule).unwrap();
-        capsule.warnings.clear();
-        let json_without_warnings = serde_json::to_string(&capsule).unwrap();
-        // Restore warnings
-        capsule.warnings.push(crate::capsule::Warning {
-            rule: "test".to_owned(),
-            summary: "test warning".to_owned(),
-            severity: "low".to_owned(),
+
+        // Serialize the full capsule to measure.
+        let full_json = serde_json::to_string(&capsule).unwrap();
+
+        // Build the expected post-Phase-1 capsule: skeletons cleared AND
+        // the stats fields that the production trim touches updated to
+        // match, so JSON byte counts compare faithfully.
+        let mut without_skeletons = capsule.clone();
+        without_skeletons.skeletons.clear();
+        without_skeletons.stats.skeleton_files = 0;
+        without_skeletons.stats.skeleton_count = 0;
+        let without_skeletons_json = serde_json::to_string(&without_skeletons).unwrap();
+
+        assert!(
+            full_json.len() > without_skeletons_json.len(),
+            "test capsule skeletons must contribute bytes"
+        );
+
+        // Pick a budget that fits without skeletons but not with them.
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
+        let budget_tokens = (without_skeletons_json.len() as f64 / 3.5).ceil() as usize + 1;
+
+        let json = trim_capsule_to_budget(&mut capsule, budget_tokens, 3.5, false).unwrap();
+
+        // Skeletons gone, but warning (Phase 3) preserved at this budget.
+        assert!(
+            !json.contains("near.rs") && !json.contains("far.rs"),
+            "skeletons should have been dropped in Phase 1"
+        );
+        assert!(
+            json.contains("test warning"),
+            "warnings should still be present (Phase 3 not yet reached)"
+        );
+    }
+
+    #[test]
+    fn trim_phase2_drops_memories_before_warnings() {
+        // Add a memory entry to the test capsule and force Phase 2.
+        let mut capsule = make_test_capsule(100);
+        capsule.memories.push(crate::capsule::MemoryEntry {
+            id: 1,
+            content: "an important memory entry that takes some bytes to serialize".to_owned(),
+            kind: "insight".to_owned(),
+            session_id: "s1".to_owned(),
+            created_at: 0,
+            memory_score: 0.5,
+            is_stale: false,
+        });
+        // Reflect the memory entry in stats to mirror what
+        // `run_capsule_pipeline` writes when it adds a memory.
+        capsule.stats.memory_count = 1;
+        capsule.stats.tokens_memories = 10;
+        capsule.stats.tokens_used += 10;
+
+        let full_json = serde_json::to_string(&capsule).unwrap();
+
+        // Build the expected post-Phase-2 capsule: skeletons AND memories
+        // cleared, stats mirrored to match production.
+        let mut phase2 = capsule.clone();
+        phase2.skeletons.clear();
+        phase2.stats.skeleton_files = 0;
+        phase2.stats.skeleton_count = 0;
+        phase2.memories.clear();
+        phase2.stats.memory_count = 0;
+        phase2.stats.tokens_memories = 0;
+        phase2.stats.tokens_used = phase2.stats.tokens_pivots + phase2.stats.tokens_skeletons;
+        let phase2_json = serde_json::to_string(&phase2).unwrap();
+
+        // Budget that fits after Phase 2 but not after Phase 1.
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
+        let budget_tokens = (phase2_json.len() as f64 / 3.5).ceil() as usize + 1;
+
+        let json = trim_capsule_to_budget(&mut capsule, budget_tokens, 3.5, false).unwrap();
+
+        assert!(!json.contains("near.rs"), "Phase 1 should drop skeletons");
+        assert!(
+            !json.contains("an important memory entry"),
+            "Phase 2 should drop memories"
+        );
+        assert!(
+            json.contains("test warning"),
+            "Phase 3 not yet reached, warnings should survive"
+        );
+        // Sanity: we did reduce JSON
+        assert!(json.len() < full_json.len());
+    }
+
+    #[test]
+    fn trim_phase3_drops_warnings_and_recent_changes() {
+        let mut capsule = make_test_capsule(100);
+        capsule.recent_changes.push(crate::capsule::RecentChange {
+            fqn: "test::thing".to_owned(),
+            change: "added".to_owned(),
+            old: None,
+            new: Some("fn thing()".to_owned()),
+            when: "1m ago".to_owned(),
         });
 
-        // Budget that fits without warnings but not with
+        // Expected capsule after Phase 1+2+3 (no skeletons, no memories,
+        // no warnings, no recent_changes), with stats mirrored exactly
+        // as the production trim function writes them.
+        let mut phase3 = capsule.clone();
+        phase3.skeletons.clear();
+        phase3.stats.skeleton_files = 0;
+        phase3.stats.skeleton_count = 0;
+        phase3.memories.clear();
+        phase3.stats.memory_count = 0;
+        phase3.stats.tokens_memories = 0;
+        phase3.stats.tokens_used = phase3.stats.tokens_pivots + phase3.stats.tokens_skeletons;
+        phase3.warnings.clear();
+        phase3.recent_changes.clear();
+        let phase3_json = serde_json::to_string(&phase3).unwrap();
+
         #[allow(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
             clippy::cast_precision_loss
         )]
-        let budget_tokens = (json_without_warnings.len() as f64 / 3.5).ceil() as usize + 1;
+        let budget_tokens = (phase3_json.len() as f64 / 3.5).ceil() as usize + 1;
 
-        // Sanity: warnings must add serialized bytes
-        assert!(
-            json_with_warnings.len() > json_without_warnings.len(),
-            "test capsule warnings must contribute to JSON size"
-        );
         let json = trim_capsule_to_budget(&mut capsule, budget_tokens, 3.5, false).unwrap();
         assert!(!json.contains("test warning"));
+        assert!(!json.contains("test::thing"));
+        // Pivot content still present (Phase 4 not reached)
+        assert!(json.contains("high.rs") || json.contains("low.rs"));
     }
 
     #[test]
-    fn trim_phase2_drops_skeletons_by_depth() {
-        let mut capsule = make_test_capsule(100);
-        // Tiny budget forces skeleton trimming
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            clippy::cast_precision_loss
-        )]
-        let tiny_budget = 50; // ~175 chars — far too small for full capsule
-        let json = trim_capsule_to_budget(&mut capsule, tiny_budget, 3.5, false).unwrap();
-        // All skeletons should be gone at this tiny budget
-        assert!(
-            capsule.skeletons.is_empty(),
-            "all skeletons should be trimmed"
-        );
-        assert_eq!(capsule.stats.skeleton_files, 0);
-        assert!(!json.contains("near.rs"));
-        assert!(!json.contains("far.rs"));
-    }
-
-    #[test]
-    fn trim_phase3_replaces_pivot_content() {
+    fn trim_phase4_replaces_pivot_content() {
         let mut capsule = make_test_capsule(5_000);
-        // Budget too small for pivot content
         let json = trim_capsule_to_budget(&mut capsule, 30, 3.5, false).unwrap();
         assert!(json.contains("[trimmed"));
-        // Lower-scored pivot (low.rs, score=0.1) should be trimmed first
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         let pivots = parsed["pivots"].as_array().unwrap();
-        // After sorting by score, low-scored comes first — both may be trimmed
-        // at this budget, but the trimmed marker should be present
         let has_trimmed = pivots.iter().any(|p| {
             p["content"]
                 .as_str()
                 .is_some_and(|c| c.contains("[trimmed"))
         });
         assert!(has_trimmed);
+    }
+
+    #[test]
+    fn run_capsule_pipeline_does_not_leak_error_details() {
+        // Regression guard: raw anyhow::Error chains must not be formatted into
+        // MCP ErrorData messages. All three failure paths in run_capsule_pipeline
+        // must log the error via tracing::error! and return a generic message.
+        let source = include_str!("server.rs");
+
+        // Locate the run_capsule_pipeline body.
+        let start = source
+            .find("fn run_capsule_pipeline")
+            .expect("run_capsule_pipeline must exist");
+        let end_rel = source[start..]
+            .find("\nfn ")
+            .expect("another fn must follow run_capsule_pipeline");
+        let body = &source[start..start + end_rel];
+
+        assert!(
+            !body.contains("format!(\"search failed: {e}\""),
+            "search failed should log via tracing::error! and return generic message"
+        );
+        assert!(
+            !body.contains("format!(\"capsule build failed: {e}\""),
+            "capsule build failed should log via tracing::error! and return generic message"
+        );
+        assert!(
+            !body.contains("format!(\"memory search failed: {e}\""),
+            "memory search failed should log via tracing::error! and return generic message"
+        );
     }
 
     #[test]

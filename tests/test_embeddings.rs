@@ -82,6 +82,97 @@ fn embedding_index_roundtrip() {
     }
 }
 
+/// End-to-end model integration test: downloads the pinned model from
+/// Hugging Face, verifies its SHA-256 checksums, loads it, produces
+/// embeddings, and sanity-checks that semantically related strings yield
+/// more similar vectors than unrelated strings.
+///
+/// This test hits the live network and is gated behind `#[ignore]`.
+/// Run manually with: `cargo test --test test_embeddings -- --ignored model_download_and_embed_end_to_end --nocapture`
+#[test]
+#[ignore = "hits network — run manually to verify model download URL/SHA"]
+fn model_download_and_embed_end_to_end() {
+    use ndxr::embeddings::download::{DEFAULT_MODEL, download_model, verify_model};
+    use ndxr::embeddings::model::{EMBEDDING_DIMENSION, ModelHandle};
+    use ndxr::embeddings::similarity::cosine_similarity;
+
+    let tmp = TempDir::new().unwrap();
+    let models_dir = tmp.path().join("models");
+
+    // 1. Download fresh (no prior files).
+    download_model(&models_dir, &DEFAULT_MODEL, None)
+        .expect("fresh download should succeed — if this fails, DEFAULT_MODEL URL or SHA is stale");
+
+    // 2. Verify SHA-256 matches the pinned values. `download_model` already
+    //    validates during download, but verify_model re-hashes from disk —
+    //    this catches any post-download corruption and proves the stored
+    //    bytes match the constants.
+    assert!(
+        verify_model(&models_dir, &DEFAULT_MODEL).unwrap(),
+        "verify_model should return true immediately after a successful download"
+    );
+
+    // 3. Load the model and produce an embedding.
+    let model = ModelHandle::load(&models_dir)
+        .expect("load should not error")
+        .expect("model files exist after download, load should return Some");
+
+    let vec_auth = model.embed_text("validate authentication token").unwrap();
+    let vec_login = model.embed_text("user login credentials").unwrap();
+    let vec_color = model.embed_text("the color of a sunset").unwrap();
+
+    // 4. Shape checks.
+    assert_eq!(
+        vec_auth.len(),
+        EMBEDDING_DIMENSION,
+        "embedding dimension should be 384"
+    );
+    assert_eq!(vec_login.len(), EMBEDDING_DIMENSION);
+    assert_eq!(vec_color.len(), EMBEDDING_DIMENSION);
+
+    // 5. L2-normalization: vectors should have unit norm (within float tolerance).
+    let norm: f32 = vec_auth.iter().map(|x| x * x).sum::<f32>().sqrt();
+    assert!(
+        (norm - 1.0).abs() < 1e-4,
+        "embedding should be L2-normalized, got norm = {norm}"
+    );
+
+    // 6. Semantic sanity check: auth/login should be more similar than auth/color.
+    let sim_related = cosine_similarity(&vec_auth, &vec_login);
+    let sim_unrelated = cosine_similarity(&vec_auth, &vec_color);
+    assert!(
+        sim_related > sim_unrelated,
+        "semantic similarity should rank related > unrelated: \
+         sim(auth, login)={sim_related} vs sim(auth, color)={sim_unrelated}"
+    );
+    // And the related pair should be meaningfully similar, not just marginally.
+    assert!(
+        sim_related > 0.4,
+        "semantically related strings should have cosine > 0.4, got {sim_related}"
+    );
+}
+
+/// Skip-if-verified behaviour: a second `download_model` call on a directory
+/// that already has valid files should not re-download (and must succeed).
+#[test]
+#[ignore = "hits network on first run"]
+fn model_download_is_idempotent() {
+    use ndxr::embeddings::download::{DEFAULT_MODEL, download_model, verify_model};
+
+    let tmp = TempDir::new().unwrap();
+    let models_dir = tmp.path().join("models");
+
+    download_model(&models_dir, &DEFAULT_MODEL, None).expect("first download");
+    assert!(verify_model(&models_dir, &DEFAULT_MODEL).unwrap());
+
+    // Second call should be a no-op from a correctness standpoint — it will
+    // re-download because download_model always re-fetches (the CLI has the
+    // verify-first skip, not the function). Both invocations must leave the
+    // directory in a verified state.
+    download_model(&models_dir, &DEFAULT_MODEL, None).expect("second download");
+    assert!(verify_model(&models_dir, &DEFAULT_MODEL).unwrap());
+}
+
 /// Search with embeddings should rank semantically related symbols higher.
 /// Requires the model to be downloaded in the project root — skipped in CI.
 #[test]

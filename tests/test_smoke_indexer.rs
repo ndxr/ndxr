@@ -17,7 +17,7 @@ fn index_whitespace_only_file() {
     fs::write(tmp.path().join("blank.ts"), "   \n\n  \t\n  ").unwrap();
 
     let config = ndxr::config::NdxrConfig::from_workspace(tmp.path().canonicalize().unwrap());
-    let stats = ndxr::indexer::index(&config).unwrap();
+    let stats = ndxr::indexer::index(&config, None).unwrap();
 
     assert_eq!(stats.files_indexed, 1);
     assert_eq!(stats.symbols_extracted, 0);
@@ -34,7 +34,7 @@ fn index_comment_only_file() {
     .unwrap();
 
     let config = ndxr::config::NdxrConfig::from_workspace(tmp.path().canonicalize().unwrap());
-    let stats = ndxr::indexer::index(&config).unwrap();
+    let stats = ndxr::indexer::index(&config, None).unwrap();
 
     assert_eq!(stats.files_indexed, 1);
     // Comment-only files should succeed regardless of symbol count.
@@ -48,7 +48,7 @@ fn index_syntax_error_file() {
     fs::write(tmp.path().join("broken.ts"), "function { broken }").unwrap();
 
     let config = ndxr::config::NdxrConfig::from_workspace(tmp.path().canonicalize().unwrap());
-    let result = ndxr::indexer::index(&config);
+    let result = ndxr::indexer::index(&config, None);
 
     // Must not crash; tree-sitter produces partial ASTs for broken input.
     assert!(
@@ -82,7 +82,7 @@ fn index_mixed_languages() {
     .unwrap();
 
     let config = ndxr::config::NdxrConfig::from_workspace(tmp.path().canonicalize().unwrap());
-    let stats = ndxr::indexer::index(&config).unwrap();
+    let stats = ndxr::indexer::index(&config, None).unwrap();
 
     assert_eq!(
         stats.files_indexed, 5,
@@ -119,7 +119,7 @@ fn index_deeply_nested_directory() {
     fs::write(deep_dir.join("deep.ts"), "export function deepFunc() {}").unwrap();
 
     let config = ndxr::config::NdxrConfig::from_workspace(tmp.path().canonicalize().unwrap());
-    let stats = ndxr::indexer::index(&config).unwrap();
+    let stats = ndxr::indexer::index(&config, None).unwrap();
 
     assert_eq!(stats.files_indexed, 1);
     assert!(
@@ -146,7 +146,7 @@ fn index_file_with_no_extension() {
     fs::write(tmp.path().join("ok.ts"), "export function ok() {}").unwrap();
 
     let config = ndxr::config::NdxrConfig::from_workspace(tmp.path().canonicalize().unwrap());
-    let stats = ndxr::indexer::index(&config).unwrap();
+    let stats = ndxr::indexer::index(&config, None).unwrap();
 
     // Only the .ts file should be indexed; Makefile has no supported extension.
     assert_eq!(stats.files_indexed, 1);
@@ -159,7 +159,7 @@ fn index_empty_workspace() {
     // No source files at all.
 
     let config = ndxr::config::NdxrConfig::from_workspace(tmp.path().canonicalize().unwrap());
-    let stats = ndxr::indexer::index(&config).unwrap();
+    let stats = ndxr::indexer::index(&config, None).unwrap();
 
     assert_eq!(stats.files_indexed, 0);
     assert_eq!(stats.symbols_extracted, 0);
@@ -173,7 +173,7 @@ fn index_paths_empty_list() {
     fs::write(tmp.path().join("a.ts"), "export function a() {}").unwrap();
 
     let config = ndxr::config::NdxrConfig::from_workspace(tmp.path().canonicalize().unwrap());
-    ndxr::indexer::index(&config).unwrap();
+    ndxr::indexer::index(&config, None).unwrap();
 
     // index_paths with an empty list should succeed immediately.
     let stats = ndxr::indexer::index_paths(&config, &[]).unwrap();
@@ -188,7 +188,7 @@ fn index_paths_nonexistent_file() {
     fs::write(tmp.path().join("a.ts"), "export function a() {}").unwrap();
 
     let config = ndxr::config::NdxrConfig::from_workspace(tmp.path().canonicalize().unwrap());
-    ndxr::indexer::index(&config).unwrap();
+    ndxr::indexer::index(&config, None).unwrap();
 
     // Pass a nonexistent file path; should not crash.
     let bogus = vec![tmp.path().canonicalize().unwrap().join("does_not_exist.ts")];
@@ -432,7 +432,7 @@ fn reindex_preserves_memory() {
     fs::write(tmp.path().join("a.ts"), "export function a() {}").unwrap();
 
     let config = ndxr::config::NdxrConfig::from_workspace(tmp.path().canonicalize().unwrap());
-    ndxr::indexer::index(&config).unwrap();
+    ndxr::indexer::index(&config, None).unwrap();
 
     // Insert session and observation into the DB.
     let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
@@ -450,7 +450,7 @@ fn reindex_preserves_memory() {
     drop(conn);
 
     // Reindex should preserve memory.
-    ndxr::indexer::reindex(&config).unwrap();
+    ndxr::indexer::reindex(&config, None).unwrap();
 
     let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
     let session_count: i64 = conn
@@ -475,8 +475,8 @@ fn reindex_idempotent_symbol_count() {
     .unwrap();
 
     let config = ndxr::config::NdxrConfig::from_workspace(tmp.path().canonicalize().unwrap());
-    let first = ndxr::indexer::reindex(&config).unwrap();
-    let second = ndxr::indexer::reindex(&config).unwrap();
+    let first = ndxr::indexer::reindex(&config, None).unwrap();
+    let second = ndxr::indexer::reindex(&config, None).unwrap();
 
     assert_eq!(
         first.symbols_extracted, second.symbols_extracted,

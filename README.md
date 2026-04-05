@@ -39,7 +39,7 @@ AI coding agents waste most of their context window reading irrelevant files. nd
 - **Logic flow tracing** -- Find execution paths between any two symbols via Yen's K-shortest paths
 - **AST structural diffs** -- Tracks symbol additions, removals, signature changes, renames across sessions
 - **Anti-pattern detection** -- Warns about dead-end explorations, file thrashing, and circular searches
-- **Semantic search** -- Download a 23 MiB model to enable meaning-based ranking that bridges vocabulary gaps
+- **Semantic search** -- Download an 86 MiB embedding model to enable meaning-based ranking that bridges vocabulary gaps
 - **Character n-gram matching** -- Partial queries like "auth" boost "authenticate" and "AuthService"
 - **Auto-relaxation** -- Never returns empty results. Progressively relaxes search if needed
 - **Cross-platform** -- Linux, macOS, Windows. Single static binary, no runtime dependencies

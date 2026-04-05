@@ -180,7 +180,7 @@ fn full_pipeline_integration() {
     let config = ndxr::config::NdxrConfig::from_workspace(tmp.path().canonicalize().unwrap());
 
     // 1. Index the project
-    let stats = ndxr::indexer::index(&config).unwrap();
+    let stats = ndxr::indexer::index(&config, None).unwrap();
     assert_eq!(stats.files_indexed, 5);
     assert!(
         stats.symbols_extracted > 10,
@@ -284,7 +284,7 @@ export interface JwtPayload {
     .unwrap();
 
     // 8. Re-index incrementally
-    let stats2 = ndxr::indexer::index(&config).unwrap();
+    let stats2 = ndxr::indexer::index(&config, None).unwrap();
     assert_eq!(
         stats2.files_indexed, 1,
         "only changed file should be re-indexed"
@@ -301,12 +301,15 @@ export interface JwtPayload {
     // 10. Search memory — verify observation surfaces
     let mem_results = ndxr::memory::search::search_memories(
         &conn,
-        "JWT authentication",
-        &[],
-        10,
-        true,
-        7.0,
-        None,
+        &ndxr::memory::search::MemorySearchQuery {
+            query: "JWT authentication",
+            pivot_fqns: &[],
+            limit: 10,
+            include_stale: true,
+            recency_half_life_days: 7.0,
+            kind: None,
+            exclude_auto: false,
+        },
     )
     .unwrap();
     assert!(
@@ -342,7 +345,7 @@ fn concurrent_search_during_reindex() {
     create_project(&tmp);
 
     let config = ndxr::config::NdxrConfig::from_workspace(tmp.path().canonicalize().unwrap());
-    ndxr::indexer::index(&config).unwrap();
+    ndxr::indexer::index(&config, None).unwrap();
 
     // Search and reindex concurrently should both succeed (WAL mode)
     let config2 = ndxr::config::NdxrConfig::from_workspace(tmp.path().canonicalize().unwrap());
@@ -354,7 +357,7 @@ fn concurrent_search_during_reindex() {
     });
 
     // Trigger incremental reindex in main thread
-    let stats = ndxr::indexer::index(&config).unwrap();
+    let stats = ndxr::indexer::index(&config, None).unwrap();
     assert_eq!(stats.skipped, 5); // nothing changed
 
     let results = search_handle.join().unwrap();

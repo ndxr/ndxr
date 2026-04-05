@@ -47,7 +47,7 @@ export function newFunction(): void {
     .unwrap();
 
     // Re-index — the indexer should detect and store diffs.
-    ndxr::indexer::index(&config).unwrap();
+    ndxr::indexer::index(&config, None).unwrap();
 
     // The symbol_changes table should be queryable after re-index.
     let conn2 = ndxr::storage::db::open_or_create(&config.db_path).unwrap();

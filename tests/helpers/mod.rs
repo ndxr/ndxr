@@ -26,7 +26,7 @@ export function validateToken(token: string): boolean { return true; }
     )
     .unwrap();
     let config = ndxr::config::NdxrConfig::from_workspace(tmp.path().canonicalize().unwrap());
-    ndxr::indexer::index(&config).unwrap();
+    ndxr::indexer::index(&config, None).unwrap();
     (tmp, config)
 }
 
@@ -152,7 +152,7 @@ pub fn index_and_build(
     ndxr::graph::builder::SymbolGraph,
 ) {
     let config = ndxr::config::NdxrConfig::from_workspace(tmp.path().canonicalize().unwrap());
-    ndxr::indexer::index(&config).unwrap();
+    ndxr::indexer::index(&config, None).unwrap();
     let conn = ndxr::storage::db::open_or_create(&config.db_path).unwrap();
     let graph = ndxr::graph::builder::build_graph(&conn).unwrap();
     ndxr::graph::centrality::compute_and_store(&conn, &graph).unwrap();

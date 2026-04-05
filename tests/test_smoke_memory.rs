@@ -217,9 +217,19 @@ fn search_memory_special_chars_only() {
     )
     .unwrap();
 
-    let results =
-        ndxr::memory::search::search_memories(&conn, "(){}[]***", &[], 10, true, 7.0, None)
-            .unwrap();
+    let results = ndxr::memory::search::search_memories(
+        &conn,
+        &ndxr::memory::search::MemorySearchQuery {
+            query: "(){}[]***",
+            pivot_fqns: &[],
+            limit: 10,
+            include_stale: true,
+            recency_half_life_days: 7.0,
+            kind: None,
+            exclude_auto: false,
+        },
+    )
+    .unwrap();
     assert!(
         results.is_empty(),
         "query with only FTS5 special chars should return empty"
@@ -246,9 +256,19 @@ fn search_memory_very_long_query() {
     .unwrap();
 
     let long_query = "token ".repeat(1_700); // ~10k chars
-    let results =
-        ndxr::memory::search::search_memories(&conn, &long_query, &[], 10, true, 7.0, None)
-            .unwrap();
+    let results = ndxr::memory::search::search_memories(
+        &conn,
+        &ndxr::memory::search::MemorySearchQuery {
+            query: &long_query,
+            pivot_fqns: &[],
+            limit: 10,
+            include_stale: true,
+            recency_half_life_days: 7.0,
+            kind: None,
+            exclude_auto: false,
+        },
+    )
+    .unwrap();
     // Should not crash. May or may not return results depending on FTS5 behaviour.
     assert!(results.len() <= 10);
 }
@@ -274,12 +294,15 @@ fn search_memory_empty_pivot_fqns() {
 
     let results = ndxr::memory::search::search_memories(
         &conn,
-        "JWT authentication",
-        &[],
-        10,
-        true,
-        7.0,
-        None,
+        &ndxr::memory::search::MemorySearchQuery {
+            query: "JWT authentication",
+            pivot_fqns: &[],
+            limit: 10,
+            include_stale: true,
+            recency_half_life_days: 7.0,
+            kind: None,
+            exclude_auto: false,
+        },
     )
     .unwrap();
     assert!(!results.is_empty());
@@ -334,11 +357,33 @@ fn search_memory_include_stale_true_vs_false() {
     ndxr::memory::staleness::detect_staleness(&conn, &changed).unwrap();
 
     // Including stale: should return both.
-    let with_stale =
-        ndxr::memory::search::search_memories(&conn, "JWT", &[], 10, true, 7.0, None).unwrap();
+    let with_stale = ndxr::memory::search::search_memories(
+        &conn,
+        &ndxr::memory::search::MemorySearchQuery {
+            query: "JWT",
+            pivot_fqns: &[],
+            limit: 10,
+            include_stale: true,
+            recency_half_life_days: 7.0,
+            kind: None,
+            exclude_auto: false,
+        },
+    )
+    .unwrap();
     // Excluding stale: should return fewer.
-    let without_stale =
-        ndxr::memory::search::search_memories(&conn, "JWT", &[], 10, false, 7.0, None).unwrap();
+    let without_stale = ndxr::memory::search::search_memories(
+        &conn,
+        &ndxr::memory::search::MemorySearchQuery {
+            query: "JWT",
+            pivot_fqns: &[],
+            limit: 10,
+            include_stale: false,
+            recency_half_life_days: 7.0,
+            kind: None,
+            exclude_auto: false,
+        },
+    )
+    .unwrap();
 
     assert!(
         without_stale.len() <= with_stale.len(),
@@ -373,9 +418,19 @@ fn search_memory_limit_zero() {
     )
     .unwrap();
 
-    let results =
-        ndxr::memory::search::search_memories(&conn, "JWT authentication", &[], 0, true, 7.0, None)
-            .unwrap();
+    let results = ndxr::memory::search::search_memories(
+        &conn,
+        &ndxr::memory::search::MemorySearchQuery {
+            query: "JWT authentication",
+            pivot_fqns: &[],
+            limit: 0,
+            include_stale: true,
+            recency_half_life_days: 7.0,
+            kind: None,
+            exclude_auto: false,
+        },
+    )
+    .unwrap();
     assert!(results.is_empty(), "limit=0 should return empty results");
 }
 
@@ -404,12 +459,15 @@ fn search_memory_returns_linked_fqns() {
 
     let results = ndxr::memory::search::search_memories(
         &conn,
-        "JWT authentication",
-        &[],
-        10,
-        true,
-        7.0,
-        None,
+        &ndxr::memory::search::MemorySearchQuery {
+            query: "JWT authentication",
+            pivot_fqns: &[],
+            limit: 10,
+            include_stale: true,
+            recency_half_life_days: 7.0,
+            kind: None,
+            exclude_auto: false,
+        },
     )
     .unwrap();
     assert!(!results.is_empty());

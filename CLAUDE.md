@@ -206,6 +206,8 @@ Every `.rs` file follows this top-to-bottom order. **Never mix sections.**
 - `symbol_to_embedding_text()` → `embeddings/model.rs`
 - `cosine_similarity()` → `embeddings/similarity.rs`
 - `trigram_similarity()` → `indexer/tokenizer.rs`
+- `MemorySearchQuery` → `memory/search.rs` (wraps `search_memories` parameters; adding fields here is the single place that controls the API)
+- `DEFAULT_MODEL` → `embeddings/download.rs` (single source of truth for model URL/SHA/filename; `onnx_filename` is also consumed by `ModelHandle::load`, and the 86 MiB size is mirrored in `README.md`, `docs/ARCHITECTURE.md`, `CLAUDE.md` "Semantic Search" section, and `src/embeddings/mod.rs` — all five must change in lockstep)
 
 ### No Dead Code / No Deferred Work
 
@@ -218,6 +220,7 @@ Every `.rs` file follows this top-to-bottom order. **Never mix sections.**
 - **Integration tests**: `tests/` directory, test public API as separate crate
 - **Test quality**: test behavior not implementation, strong assertions (specific values not `> 0`), cover edge cases + error paths
 - **Shared helpers**: `tests/helpers/mod.rs` — `setup_indexed_workspace`, `create_search_project`, `create_capsule_project`, `index_and_build`
+- **Network-gated tests**: tests that hit live endpoints (HF download, upstream URL probes) are `#[ignore = "hits network — …"]` so `make ci` stays offline. Run manually with `cargo test --test <file> -- --ignored`. Canonical examples: `model_download_and_embed_end_to_end` and `model_download_is_idempotent` in `tests/test_embeddings.rs`
 
 ## Key Constants
 
@@ -299,6 +302,15 @@ Every `.rs` file follows this top-to-bottom order. **Never mix sections.**
 - **`tokenizers` crate requires `fancy-regex`** — `default-features = false` strips the regex backend. Always include `features = ["fancy-regex"]`
 - **`CLAUDE_MD_SECTION` is MCP-tool-only** — the auto-generated section in `main.rs` documents MCP tools only. Non-MCP features (semantic search, n-gram) belong in the manually-maintained part of CLAUDE.md
 - **`ScoreBreakdown` literals in 5+ locations** — adding fields to `ScoreBreakdown` requires updating: `scoring.rs`, `relaxation.rs` (fts5_fallback), `builder.rs` (test), `server.rs` (tests), `test_smoke_capsule.rs`
+- **Clippy `option_if_let_else` also catches `map_or(true, ...)`** — `opt.map_or(true, |v| cond)` denied under nursery. Use `opt.is_none_or(|v| cond)`
+- **Clippy `too_many_lines` limit is 100** (the ≤50 rule above is the project target). When adding stage logging or small features to pipeline functions (`index_inner`, watcher `start`), extract helpers aggressively to stay under 100
+- **Rustdoc backticks flow through schemars into JSON schema** — doc comments on schema structs (e.g. `GetImpactGraphParams.symbol_fqn`) must wrap identifiers like `` `run_pipeline` `` in backticks (rustdoc `missing_backticks_doc_comments`), and the backticks are preserved literally in the tool's `input_schema` description string — tests asserting on description content see the raw `` `identifier` ``
+- **`storage::db::open_or_create(path)` auto-creates missing parent directories** via `create_dir_all`. Tests that want to force it to fail need a parent that is a regular file (e.g. `tmp/not_a_dir/db.sqlite` where `not_a_dir` is a file), not just a nonexistent path
+- **Source-text regression tests via `include_str!("server.rs")`** — used in `mcp::server::tests::run_capsule_pipeline_does_not_leak_error_details` to enforce "never `format!(\"...{e}\")` in `ErrorData`" by asserting the forbidden substring is absent from a specific function's body
+- **HuggingFace URL pinning** — `DEFAULT_MODEL.onnx_url` uses `resolve/<40-char git SHA>` rather than `resolve/main`. Pinning gives immutable downloads (upstream renames/retrains can't break us). To update: bump the commit hash, re-download once, update both SHA-256 constants
+- **tract-onnx + modern transformer ONNX exports** — every int8/fp16/graph-optimized variant from `optimum-cli`/Xenova keeps `batch_size`/`sequence_length` as symbolic `Unsqueeze` dims that tract 0.21's `into_typed()` cannot unify with in-graph constants ("Impossible to unify Sym(batch_size) with Val(1)"). Only `sentence-transformers/all-MiniLM-L6-v2/onnx/model.onnx` (FP32, 86 MiB) loads cleanly — don't waste time trying smaller variants
+- **BERT ONNX export has three inputs** — `ModelHandle::load` must set `with_input_fact(0/1/2)` for `input_ids`, `attention_mask`, AND `token_type_ids`. `embed_text` must pass all three tensors to `model.run(tvec![...])`. Missing the third input is a silent tract-analysis failure, not a type error
+- **Bash cwd drift after "Shell cwd was reset"** — after any `Shell cwd was reset to …` notice, Bash runs in the main checkout, NOT the worktree. Re-`cd` into the worktree and verify with `pwd && git rev-parse --abbrev-ref HEAD` before editing files. Silent-failure risk: edits land on main instead of the feature branch
 
 ## CI / Makefile Parity
 
@@ -348,4 +360,4 @@ Example: `mcp__ndxr__run_pipeline({ task: "fix the auth crash", intent: "debug" 
 
 ### Semantic Search (Optional)
 
-Run `ndxr model download` to enable embedding-based semantic search. This downloads a 23 MiB model to `.ndxr/models/` that lets ndxr find semantically related code even when queries use different vocabulary than the source (e.g., "verify credentials" finds `authenticateUser`). If the model is not downloaded, ndxr works normally using lexical search.
+Run `ndxr model download` to enable embedding-based semantic search. This downloads an 86 MiB `all-MiniLM-L6-v2` FP32 model (384-d embeddings) to `.ndxr/models/` that lets ndxr find semantically related code even when queries use different vocabulary than the source (e.g., "verify credentials" finds `authenticateUser`). If the model is not downloaded, ndxr works normally using lexical search.

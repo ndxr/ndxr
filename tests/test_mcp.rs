@@ -101,7 +101,7 @@ fn setup_workspace() -> (TempDir, NdxrConfig, rusqlite::Connection) {
     let config = NdxrConfig::from_workspace(workspace);
 
     // Run the indexer (which now also builds graph + PageRank).
-    let stats = indexer::index(&config).unwrap();
+    let stats = indexer::index(&config, None).unwrap();
     assert!(stats.files_indexed > 0, "should index at least one file");
     assert!(
         stats.symbols_extracted > 0,
@@ -290,8 +290,19 @@ fn save_and_search_observation_roundtrip() {
     assert!(obs_id > 0, "observation ID should be positive");
 
     // Search for the observation.
-    let results =
-        mem_search::search_memories(&conn, "JWT authentication", &[], 5, false, 7.0, None).unwrap();
+    let results = mem_search::search_memories(
+        &conn,
+        &mem_search::MemorySearchQuery {
+            query: "JWT authentication",
+            pivot_fqns: &[],
+            limit: 5,
+            include_stale: false,
+            recency_half_life_days: 7.0,
+            kind: None,
+            exclude_auto: false,
+        },
+    )
+    .unwrap();
 
     assert!(
         !results.is_empty(),

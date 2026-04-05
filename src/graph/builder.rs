@@ -105,9 +105,23 @@ pub fn build_graph(conn: &Connection) -> Result<SymbolGraph> {
 /// `reindex` tool (after full re-index).
 #[must_use]
 pub fn rebuild_graph_from_db(db_path: &std::path::Path) -> Option<SymbolGraph> {
-    let conn = crate::storage::db::open_or_create(db_path).ok()?;
-    let graph = build_graph(&conn).ok()?;
-    let _ = crate::graph::centrality::compute_and_store(&conn, &graph);
+    let conn = match crate::storage::db::open_or_create(db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("graph rebuild: failed to open database: {e}");
+            return None;
+        }
+    };
+    let graph = match build_graph(&conn) {
+        Ok(g) => g,
+        Err(e) => {
+            tracing::warn!("graph rebuild: failed to build graph: {e}");
+            return None;
+        }
+    };
+    if let Err(e) = crate::graph::centrality::compute_and_store(&conn, &graph) {
+        tracing::warn!("graph rebuild: PageRank computation failed: {e}");
+    }
     Some(graph)
 }
 
@@ -174,5 +188,27 @@ mod tests {
         assert!(graph.id_to_node.contains_key(&sym1));
         assert!(graph.id_to_node.contains_key(&sym2));
         assert_eq!(graph.node_to_id.len(), 2);
+    }
+
+    #[test]
+    fn rebuild_graph_from_db_returns_none_for_invalid_path() {
+        // Passing a path whose parent is a regular file (not a directory)
+        // makes open_or_create fail at the `create_dir_all(parent)` step.
+        let tmp = TempDir::new().unwrap();
+        let parent_as_file = tmp.path().join("not_a_dir");
+        std::fs::write(&parent_as_file, b"placeholder").unwrap();
+        let bogus = parent_as_file.join("db.sqlite");
+        let result = rebuild_graph_from_db(&bogus);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn rebuild_graph_from_db_succeeds_on_valid_db() {
+        let tmp2 = TempDir::new().unwrap();
+        let db_path = tmp2.path().join("test.db");
+        let _c = db::open_or_create(&db_path).unwrap();
+        drop(_c);
+        let graph = rebuild_graph_from_db(&db_path);
+        assert!(graph.is_some(), "rebuild should succeed for valid empty DB");
     }
 }

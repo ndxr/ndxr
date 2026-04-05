@@ -250,3 +250,16 @@ fn cascade_delete_session_removes_observations_and_fts() {
         "observations FTS should be cleaned by delete trigger"
     );
 }
+
+#[test]
+fn collect_index_status_reports_schema_version() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("test.db");
+    let conn = ndxr::storage::db::open_or_create(&db_path).unwrap();
+    let status = ndxr::status::collect_index_status(&conn, &db_path).unwrap();
+    assert!(
+        status.schema_version >= 3,
+        "expected schema_version >= 3 after migrations, got {}",
+        status.schema_version
+    );
+}

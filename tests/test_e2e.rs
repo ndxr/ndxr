@@ -1277,9 +1277,19 @@ fn e2e_memory_search_persists_score_to_db() {
     );
 
     // Search for the observation.
-    let results =
-        ndxr::memory::search::search_memories(&conn, "JWT validation", &[], 10, true, 7.0, None)
-            .unwrap();
+    let results = ndxr::memory::search::search_memories(
+        &conn,
+        &ndxr::memory::search::MemorySearchQuery {
+            query: "JWT validation",
+            pivot_fqns: &[],
+            limit: 10,
+            include_stale: true,
+            recency_half_life_days: 7.0,
+            kind: None,
+            exclude_auto: false,
+        },
+    )
+    .unwrap();
     assert!(!results.is_empty(), "should find the observation");
 
     // Score should now be persisted in the DB.

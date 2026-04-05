@@ -39,6 +39,26 @@ const STALENESS_PENALTY: f64 = 0.30;
 /// Maximum number of FTS5 candidates to retrieve before scoring.
 const FTS_CANDIDATE_LIMIT: usize = 50;
 
+/// Parameters for [`search_memories`].
+pub struct MemorySearchQuery<'a> {
+    /// Natural-language query to search observation content.
+    pub query: &'a str,
+    /// Pivot symbol FQNs for the proximity component.
+    pub pivot_fqns: &'a [String],
+    /// Maximum number of results to return after scoring.
+    pub limit: usize,
+    /// Whether to include stale observations in the result.
+    pub include_stale: bool,
+    /// Recency half-life in days for the recency decay component.
+    pub recency_half_life_days: f64,
+    /// Optional post-scoring kind filter (e.g. `Some("insight")`).
+    pub kind: Option<&'a str>,
+    /// When true, auto-captured tool-call observations are filtered out at the
+    /// FTS5 candidate stage (before scoring) to prevent them from crowding out
+    /// meaningful insights/decisions under the candidate limit.
+    pub exclude_auto: bool,
+}
+
 /// Searches observations using hybrid scoring.
 ///
 /// The composite score is computed as:
@@ -59,21 +79,16 @@ const FTS_CANDIDATE_LIMIT: usize = 50;
 #[allow(clippy::cast_precision_loss)] // usize->f64 loss negligible for counts
 pub fn search_memories(
     conn: &Connection,
-    query: &str,
-    pivot_fqns: &[String],
-    limit: usize,
-    include_stale: bool,
-    recency_half_life_days: f64,
-    kind: Option<&str>,
+    params: &MemorySearchQuery<'_>,
 ) -> Result<Vec<MemoryResult>> {
-    if query.trim().is_empty() {
+    if params.query.trim().is_empty() {
         return Ok(Vec::new());
     }
 
-    let recency_half_life_days = recency_half_life_days.max(f64::EPSILON);
+    let recency_half_life_days = params.recency_half_life_days.max(f64::EPSILON);
 
     // 1. Collect FTS5 candidates with BM25 scores.
-    let candidates = fts_candidates(conn, query)?;
+    let candidates = fts_candidates(conn, params.query, params.exclude_auto)?;
     if candidates.is_empty() {
         return Ok(Vec::new());
     }
@@ -84,14 +99,14 @@ pub fn search_memories(
     let all_links = batch_load_observation_links(conn, &candidate_ids)?;
 
     // 3. Tokenize query for TF-IDF cosine similarity.
-    let query_tokens = tokenizer::tokenize_text(query);
+    let query_tokens = tokenizer::tokenize_text(params.query);
     let query_tf = tokenizer::compute_tf(&query_tokens);
 
     // 4. Compute min/max BM25 for normalisation.
     let (bm25_min, bm25_max) = bm25_range(&candidates);
 
     let now_secs = unix_now();
-    let pivot_set: HashSet<&str> = pivot_fqns.iter().map(String::as_str).collect();
+    let pivot_set: HashSet<&str> = params.pivot_fqns.iter().map(String::as_str).collect();
 
     // 5. Score each candidate.
     let mut results: Vec<MemoryResult> = Vec::with_capacity(candidates.len());
@@ -102,7 +117,7 @@ pub fn search_memories(
         };
 
         // Filter stale if requested.
-        if !include_stale && obs.is_stale {
+        if !params.include_stale && obs.is_stale {
             continue;
         }
 
@@ -154,10 +169,10 @@ pub fn search_memories(
 
     // 6. Sort by score descending, filter by kind, and truncate.
     results.sort_by(|a, b| b.memory_score.total_cmp(&a.memory_score));
-    if let Some(kind_filter) = kind {
+    if let Some(kind_filter) = params.kind {
         results.retain(|r| r.observation.kind == kind_filter);
     }
-    results.truncate(limit);
+    results.truncate(params.limit);
 
     // 7. Persist scores to the database for later retrieval without recomputation.
     persist_scores(conn, &results);
@@ -169,22 +184,33 @@ pub fn search_memories(
 ///
 /// Returns `(observation_id, abs(bm25_score))` pairs. BM25 column weights:
 /// content = 5.0, headline = 1.0.
-fn fts_candidates(conn: &Connection, query: &str) -> Result<Vec<(i64, f64)>> {
+///
+/// When `exclude_auto` is true, observations with `kind = 'auto'` are filtered
+/// out before the FTS5 candidate limit is applied, so auto-captured tool call
+/// logs cannot crowd out meaningful insights under the `FTS_CANDIDATE_LIMIT`.
+fn fts_candidates(conn: &Connection, query: &str, exclude_auto: bool) -> Result<Vec<(i64, f64)>> {
     // Escape FTS5 special characters by quoting each token.
     let fts_query = build_fts_query(query);
     if fts_query.is_empty() {
         return Ok(Vec::new());
     }
 
-    let mut stmt = conn
-        .prepare(
-            "SELECT rowid, bm25(observations_fts, 5.0, 1.0) AS score \
-             FROM observations_fts \
-             WHERE observations_fts MATCH ?1 \
-             ORDER BY score \
-             LIMIT ?2",
-        )
-        .context("prepare FTS5 candidate query")?;
+    let sql = if exclude_auto {
+        "SELECT fts.rowid, bm25(observations_fts, 5.0, 1.0) AS score \
+         FROM observations_fts fts \
+         JOIN observations o ON o.id = fts.rowid \
+         WHERE observations_fts MATCH ?1 AND o.kind != 'auto' \
+         ORDER BY score \
+         LIMIT ?2"
+    } else {
+        "SELECT rowid, bm25(observations_fts, 5.0, 1.0) AS score \
+         FROM observations_fts \
+         WHERE observations_fts MATCH ?1 \
+         ORDER BY score \
+         LIMIT ?2"
+    };
+
+    let mut stmt = conn.prepare(sql).context("prepare FTS5 candidate query")?;
 
     let rows = stmt
         .query_map(

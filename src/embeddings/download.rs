@@ -37,13 +37,21 @@ pub struct ModelInfo {
     pub tokenizer_filename: &'static str,
 }
 
-/// Default model: `all-MiniLM-L6-v2` INT8 quantized (384 dimensions).
+/// Default model: `all-MiniLM-L6-v2` FP32 (384-dimensional embeddings, ~86 MiB).
+///
+/// URLs are pinned to a specific Hugging Face git commit rather than `main`,
+/// so downloads are reproducible and immune to upstream file renames. To adopt
+/// a new upstream revision, bump the commit hash here and update the checksums.
+///
+/// FP32 is used because `tract-onnx` (pure-Rust inference) is the supported
+/// runtime and loads this export cleanly across every platform — no CPU-specific
+/// variants needed.
 pub const DEFAULT_MODEL: ModelInfo = ModelInfo {
-    name: "all-MiniLM-L6-v2-int8",
-    onnx_url: "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model_quantized.onnx",
-    onnx_sha256: "f36668ddf22403a332f978057d527cf285b01468bc3431b04094a7bafa6aba59",
-    onnx_filename: "model_quantized.onnx",
-    tokenizer_url: "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json",
+    name: "all-MiniLM-L6-v2-fp32",
+    onnx_url: "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf/onnx/model.onnx",
+    onnx_sha256: "6fd5d72fe4589f189f8ebc006442dbb529bb7ce38f8082112682524616046452",
+    onnx_filename: "model.onnx",
+    tokenizer_url: "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf/tokenizer.json",
     tokenizer_sha256: "be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037",
     tokenizer_filename: "tokenizer.json",
 };
@@ -84,11 +92,18 @@ pub fn verify_model(dir: &Path, info: &ModelInfo) -> Result<bool> {
 /// Creates `dir` if it does not exist. Each file is downloaded to a temporary
 /// path and renamed into place only after SHA-256 verification succeeds.
 ///
+/// When `on_progress` is `Some`, each successfully downloaded file emits a
+/// `"{filename}: done ({size})"` message.
+///
 /// # Errors
 ///
 /// Returns an error if the download fails, the checksum does not match, or
 /// the filesystem operations fail.
-pub fn download_model(dir: &Path, info: &ModelInfo) -> Result<()> {
+pub fn download_model(
+    dir: &Path,
+    info: &ModelInfo,
+    on_progress: Option<&dyn Fn(&str)>,
+) -> Result<()> {
     fs::create_dir_all(dir)
         .with_context(|| format!("failed to create model directory: {}", dir.display()))?;
 
@@ -96,6 +111,7 @@ pub fn download_model(dir: &Path, info: &ModelInfo) -> Result<()> {
         info.onnx_url,
         info.onnx_sha256,
         &dir.join(info.onnx_filename),
+        on_progress,
     )
     .with_context(|| format!("failed to download ONNX model: {}", info.onnx_url))?;
 
@@ -103,6 +119,7 @@ pub fn download_model(dir: &Path, info: &ModelInfo) -> Result<()> {
         info.tokenizer_url,
         info.tokenizer_sha256,
         &dir.join(info.tokenizer_filename),
+        on_progress,
     )
     .with_context(|| format!("failed to download tokenizer: {}", info.tokenizer_url))?;
 
@@ -110,8 +127,13 @@ pub fn download_model(dir: &Path, info: &ModelInfo) -> Result<()> {
 }
 
 /// Downloads a single file, verifies its SHA-256, and atomically moves it into
-/// place.
-fn download_verified(url: &str, expected_sha256: &str, dest: &Path) -> Result<()> {
+/// place. Emits a progress message after success when `on_progress` is `Some`.
+fn download_verified(
+    url: &str,
+    expected_sha256: &str,
+    dest: &Path,
+    on_progress: Option<&dyn Fn(&str)>,
+) -> Result<()> {
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
         .timeout(Duration::from_secs(READ_TIMEOUT_SECS))
@@ -121,7 +143,9 @@ fn download_verified(url: &str, expected_sha256: &str, dest: &Path) -> Result<()
     let response = client
         .get(url)
         .send()
-        .with_context(|| format!("HTTP request failed: {url}"))?
+        .with_context(|| {
+            format!("Download failed: {url}. Check your internet connection and try again.")
+        })?
         .error_for_status()
         .with_context(|| format!("HTTP error for {url}"))?;
 
@@ -161,6 +185,17 @@ fn download_verified(url: &str, expected_sha256: &str, dest: &Path) -> Result<()
         )
     })?;
 
+    if let Some(cb) = on_progress {
+        let filename = dest.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+        // `usize -> u64` is widening on every Rust target (usize ≤ u64),
+        // so no clippy allow is required here.
+        let size_u64 = data.len() as u64;
+        cb(&format!(
+            "  {filename}: done ({})",
+            format_bytes_human(size_u64)
+        ));
+    }
+
     Ok(())
 }
 
@@ -176,6 +211,30 @@ fn hex_sha256(data: &[u8]) -> String {
     format!("{:x}", Sha256::digest(data))
 }
 
+/// Formats a byte count as a human-readable string (B / KiB / MiB / GiB).
+#[must_use]
+pub(crate) fn format_bytes_human(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    if bytes >= GIB {
+        #[allow(clippy::cast_precision_loss)] // byte counts fit in f64 with negligible loss
+        let val = bytes as f64 / GIB as f64;
+        format!("{val:.1} GiB")
+    } else if bytes >= MIB {
+        #[allow(clippy::cast_precision_loss)] // byte counts fit in f64 with negligible loss
+        let val = bytes as f64 / MIB as f64;
+        format!("{val:.1} MiB")
+    } else if bytes >= KIB {
+        #[allow(clippy::cast_precision_loss)] // byte counts fit in f64 with negligible loss
+        let val = bytes as f64 / KIB as f64;
+        format!("{val:.1} KiB")
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,6 +248,16 @@ mod tests {
             !result,
             "verify_model should return false when files are missing"
         );
+    }
+
+    #[test]
+    fn format_bytes_helper_renders_common_sizes() {
+        assert_eq!(format_bytes_human(0), "0 B");
+        assert_eq!(format_bytes_human(512), "512 B");
+        assert_eq!(format_bytes_human(1024), "1.0 KiB");
+        assert_eq!(format_bytes_human(1536), "1.5 KiB");
+        assert_eq!(format_bytes_human(1_048_576), "1.0 MiB");
+        assert_eq!(format_bytes_human(22 * 1_048_576 + 420 * 1024), "22.4 MiB");
     }
 
     #[test]

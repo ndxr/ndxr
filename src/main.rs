@@ -29,7 +29,9 @@ enum Commands {
         long_about = "Index or update the current workspace (incremental).\n\n\
                        On first run, indexes all supported source files. On subsequent runs,\n\
                        only processes files that have been added, changed, or deleted since\n\
-                       the last index. Unchanged files are skipped via BLAKE3 hash comparison."
+                       the last index. Unchanged files are skipped via BLAKE3 hash comparison.\n\n\
+                       Create a .ndxrignore file in the workspace root to exclude additional\n\
+                       paths (uses .gitignore syntax)."
     )]
     Index {
         /// Show detailed output.
@@ -84,8 +86,11 @@ enum Commands {
     /// Show index statistics.
     #[command(long_about = "Show index statistics.\n\n\
                        Displays file, symbol, edge, session, and observation counts,\n\
-                       database size, and last index timestamp. Use --json for\n\
-                       machine-readable output.")]
+                       database size, schema version, and last index timestamp.\n\
+                       Use --json for machine-readable output.\n\n\
+                       Environment variables:\n\
+                       \x20 NDXR_MAX_TOKENS       Override maximum token budget (default: 20000, -1 for unlimited)\n\
+                       \x20 NDXR_CHARS_PER_TOKEN  Override characters-per-token ratio (default: 3.5)")]
     Status {
         /// Output as JSON.
         #[arg(long)]
@@ -259,7 +264,10 @@ fn cmd_index(verbose: bool) -> Result<()> {
         eprintln!("Indexing workspace: {}", config.workspace_root.display());
     }
 
-    let stats = ndxr::indexer::index(&config)?;
+    let progress_fn = |msg: &str| eprintln!("  {msg}");
+    let callback: Option<&dyn Fn(&str)> = if verbose { Some(&progress_fn) } else { None };
+
+    let stats = ndxr::indexer::index(&config, callback)?;
 
     println!(
         "Indexed {} files ({} new, {} deleted, {} skipped)",
@@ -295,7 +303,10 @@ fn cmd_reindex(verbose: bool) -> Result<()> {
         eprintln!("Re-indexing workspace: {}", config.workspace_root.display());
     }
 
-    let stats = ndxr::indexer::reindex(&config)?;
+    let progress_fn = |msg: &str| eprintln!("  {msg}");
+    let callback: Option<&dyn Fn(&str)> = if verbose { Some(&progress_fn) } else { None };
+
+    let stats = ndxr::indexer::reindex(&config, callback)?;
 
     println!("Re-indexed {} files", stats.files_indexed);
     println!(
@@ -385,6 +396,7 @@ fn cmd_status(json: bool) -> Result<()> {
             "db_size_bytes": status.db_size_bytes,
             "embeddings_count": status.embeddings_count,
             "embeddings_model": status.embeddings_model,
+            "schema_version": status.schema_version,
             "workspace_root": config.workspace_root.display().to_string(),
         });
         println!(
@@ -418,6 +430,7 @@ fn cmd_status(json: bool) -> Result<()> {
                 println!("  Embeddings:    {}", status.embeddings_count);
             }
         }
+        println!("  Schema:        v{}", status.schema_version);
         println!("  DB size:       {}", format_bytes(status.db_size_bytes));
         if let Some(newest) = status.newest_indexed_at {
             println!("  Last indexed:  {}", format_age(newest));
@@ -465,6 +478,7 @@ fn cmd_search(query: &str, limit: usize, intent_str: Option<&str>, explain: bool
 
     if results.is_empty() {
         println!("No results found for: {query}");
+        println!("Hint: run 'ndxr reindex' if you recently added files, or try broader terms.");
         return Ok(());
     }
 
@@ -507,7 +521,19 @@ fn cmd_skeleton(files: &[String], include_docs: bool) -> Result<()> {
     let skeletons = ndxr::skeleton::reducer::render_skeletons(&conn, files, include_docs)?;
 
     if skeletons.is_empty() {
-        println!("No symbols found for the specified files.");
+        // Report which requested files are not in the files table so the user
+        // can correct their path arguments instead of guessing.
+        for file in files {
+            let indexed: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM files WHERE path = ?1)",
+                rusqlite::params![file],
+                |row| row.get(0),
+            )?;
+            if !indexed {
+                eprintln!("  Not indexed: {file}");
+            }
+        }
+        println!("No symbols found. Check that file paths are relative to the workspace root.");
         return Ok(());
     }
 
@@ -527,13 +553,41 @@ fn cmd_skeleton(files: &[String], include_docs: bool) -> Result<()> {
 fn cmd_model_download() -> Result<()> {
     let root = find_root()?;
     let models_dir = root.join(".ndxr").join("models");
+    let info = &ndxr::embeddings::download::DEFAULT_MODEL;
+
+    // 7a: Skip download if the files already exist and match expected checksums.
+    if ndxr::embeddings::download::verify_model(&models_dir, info)? {
+        println!(
+            "Model already downloaded and verified at {}",
+            models_dir.display()
+        );
+        return Ok(());
+    }
+
     std::fs::create_dir_all(&models_dir)
         .with_context(|| format!("create {}", models_dir.display()))?;
-    ndxr::embeddings::download::download_model(
-        &models_dir,
-        &ndxr::embeddings::download::DEFAULT_MODEL,
-    )?;
+
+    // 7b: Print a preamble and wire per-file progress to stderr.
+    eprintln!("Downloading ONNX model ({})...", info.name);
+    let progress_fn = |msg: &str| eprintln!("{msg}");
+    let callback: Option<&dyn Fn(&str)> = Some(&progress_fn);
+    ndxr::embeddings::download::download_model(&models_dir, info, callback)?;
+
     println!("Model ready at {}", models_dir.display());
+
+    // 7c: Post-download guidance — only if there are symbols without embeddings.
+    // We deliberately skip when the index DB does not yet exist, so that
+    // running `ndxr model download` on a fresh workspace does not create an
+    // empty index.db as a side effect.
+    let config = ndxr::config::NdxrConfig::from_workspace(root);
+    if config.db_path.exists()
+        && let Ok(conn) = ndxr::storage::db::open_or_create(&config.db_path)
+        && let Ok(status) = ndxr::status::collect_index_status(&conn, &config.db_path)
+        && status.embeddings_count < status.symbol_count
+    {
+        println!("Hint: run 'ndxr index' to compute embeddings for existing symbols.");
+    }
+
     Ok(())
 }
 
