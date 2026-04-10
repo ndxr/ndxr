@@ -59,6 +59,9 @@ ndxr index
 # Configure Claude Code integration (writes .mcp.json + CLAUDE.md)
 ndxr setup
 
+# Optional: enable semantic search (downloads an 86 MiB embedding model)
+ndxr model download && ndxr reindex
+
 # Now open Claude Code and try:
 # "Explain the authentication flow in this project"
 ```
@@ -188,6 +191,7 @@ The following directories are always excluded (both indexing and file watching):
 |----------|---------|-------------|
 | `NDXR_MAX_TOKENS` | `20000` | Maximum token budget for MCP responses. Set to `-1` for unlimited (no cap, no trimming). |
 | `NDXR_CHARS_PER_TOKEN` | `3.5` | Characters per token ratio for budget estimation. Adjusts how ndxr converts token budgets to character limits. |
+| `RUST_LOG` | `warn` | Log verbosity for all CLI subcommands (written to stderr). Try `RUST_LOG=info` for progress output or `RUST_LOG=debug` for troubleshooting. Does not affect the MCP stdout transport. |
 
 ### Setup Scopes
 
