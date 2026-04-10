@@ -1,6 +1,6 @@
 [package]
 name = "ndxr"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "Local-first context engine for AI coding agents"
@@ -25,7 +25,7 @@ petgraph = { version = "0.8", features = ["rayon"] }
 rusqlite = { version = "0.38", features = ["bundled"] }
 blake3 = "1"
 rayon = "1"
-notify = "7"
+notify = "8"
 ignore = "0.4"
 rmcp = { version = "1.2", features = ["server", "transport-io"] }
 schemars = "1"
@@ -43,7 +43,7 @@ semver = "1"
 sha2 = "0.10"
 flate2 = "1"
 tar = "0.4"
-zip = "2"
+zip = "8"
 self-replace = "1"
 tempfile = "3"
 tract-onnx = "0.21"

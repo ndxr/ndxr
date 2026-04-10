@@ -5,6 +5,55 @@ All notable changes to ndxr will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-04-10
+
+### Added
+
+- Semantic search with embeddings — run `ndxr model download` to fetch the bundled `all-MiniLM-L6-v2` model (86 MiB FP32, pinned to an immutable HuggingFace revision for reproducible downloads) and ndxr finds code by meaning, not just keywords (e.g. "verify credentials" ranks `authenticateUser`)
+- `ndxr model status` — shows whether the embedding model is downloaded and reports embedding coverage as a percentage of indexed symbols
+- Five-signal hybrid ranking — BM25 + TF-IDF + centrality + character n-gram (trigram Jaccard) + semantic, with intent-specific weight redistribution
+- Character n-gram similarity — partial queries like `auth` now boost `authenticate` and `AuthService` even without fuzzy matching
+- `ndxr search --explain` — prints all 5 scoring dimensions per result and notes when auto-relaxation was applied
+- `ndxr index --verbose` — streams stage-by-stage progress (walking, hashing, parsing, DB write, graph build, PageRank, embeddings, staleness)
+- `ndxr skeleton <path>` — reports which requested files are not indexed instead of silently omitting them
+- Workspace fallback to `.ndxr/` — running CLI commands in a non-git directory that contains an `.ndxr/` folder now works, with actionable errors (`git init` or `mkdir .ndxr`) when neither is present
+- CLI tracing — all CLI subcommands honor `RUST_LOG` (stderr, default `warn`); MCP stdout transport stays untouched
+- Empty-capsule diagnostics — MCP responses now carry a `no_results_reason` field explaining why (empty index, no matches, relaxation fallback) instead of a silently empty `pivots` array
+- Human-readable timestamps — every MCP response field with a Unix timestamp also gets a `_human` field like "2m ago"; `index_status` includes an `is_stale` flag
+- `save_observation` — now accepts a `headline` field and rejects empty content
+- `ndxr setup --scope` — typo-proof via clap `ValueEnum`; prints "Next: run ndxr index" on completion
+- 24 new MCP protocol conformance tests covering lifecycle, tools/list, error paths, and concurrency
+- `ndxr search` / `ndxr status` surface `.ndxrignore`, `NDXR_MAX_TOKENS`, `NDXR_CHARS_PER_TOKEN`, and the schema migration version
+
+### Improved
+
+- `run_pipeline` is now the documented first-call tool ("call this FIRST for every task"); `get_context_capsule` is positioned as a follow-up
+- `search_memory` excludes `kind='auto'` tool-call logs by default so hand-written insights surface first — pass `exclude_auto=false` to include them
+- Capsule trim order reversed — skeletons are dropped before memories, warnings, and pivots, so actionable warnings survive tight budgets
+- Invalid `--intent` values now warn and fall back to auto-detection instead of being silently ignored
+- Quick-start banner mentions `ndxr model download` as an optional step
+- `ndxr model download` skips the HTTP round-trip when files already verify locally, prints per-file size, and hints at `ndxr index` when embedding coverage is low
+- `search_logic_flow` errors now return structured, client-safe messages ("symbol not found" / "ambiguous symbol name") instead of raw internal error chains
+- Watcher only recomputes embeddings when the preceding re-index and graph rebuild succeeded — no more stale embeddings against a partially-written DB
+- `get_session_context`, change correlation, and circular-search detection now use a deterministic `id` tiebreaker — same-second observations no longer reorder between calls (three queries that were missed by the v0.7.0 fix)
+- `ndxr model status` now explains why embedding coverage is missing (DB error, no index yet) instead of silently omitting the line
+- `ndxr activity --follow` propagates real DB errors instead of silently rewinding to the start of history
+- "symbol graph not initialized" errors now tell the agent to run `reindex`
+- File watcher, graph rebuild, and indexer file-read paths log previously-silent failures via `tracing::warn!`
+
+### Fixed
+
+- MCP clients no longer receive raw anyhow error chains from `search_logic_flow` or `run_pipeline` — all internal failures return a generic message and the detail is logged via `tracing::error!`
+
+### Internals
+
+- `make lint` now enforces `clippy::pedantic` and `clippy::all` (deny), matching the quality bar documented in CLAUDE.md; `lint-nursery` stays advisory
+- `search_memories` API refactored to a `MemorySearchQuery` struct (single source of truth for the parameter surface)
+- `PathfindError` enum introduced in `graph::pathfinding` so callers can distinguish symbol-not-found / ambiguous errors from internal failures without substring matching
+- Schema V3 migration — adds `symbol_embeddings` table for embedding storage
+- CLAUDE.md registers `MemorySearchQuery`, `DEFAULT_MODEL`, and several new gotchas as DRY anchors
+- Dependencies refreshed to latest stable; clears `RUSTSEC-2024-0384` (unmaintained `instant` crate)
+
 ## [0.7.0] - 2026-03-27
 
 ### Added
