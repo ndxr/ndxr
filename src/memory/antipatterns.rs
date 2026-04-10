@@ -237,7 +237,7 @@ impl PatternRule for CircularSearchDetector {
             .prepare(
                 "SELECT kind, content FROM observations \
                  WHERE session_id = ?1 AND created_at > ?2 \
-                 ORDER BY created_at DESC \
+                 ORDER BY created_at DESC, id DESC \
                  LIMIT ?3",
             )
             .context("prepare circular-search detector query")?;

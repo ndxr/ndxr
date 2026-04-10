@@ -883,13 +883,17 @@ impl NdxrServer {
         let result =
             crate::graph::pathfinding::find_paths(&conn_guard, graph_ref, from, to, max_paths)
                 .map_err(|e| {
-                    let msg = e.to_string();
-                    if msg.contains("not found") || msg.contains("ambiguous") {
-                        rmcp::ErrorData::invalid_params(msg, None)
-                    } else {
-                        tracing::error!("logic flow search failed: {e}");
-                        rmcp::ErrorData::internal_error("logic flow search failed", None)
-                    }
+                    // Map structured pathfinding errors to client-safe messages; all
+                    // other errors collapse to a generic internal_error so we never
+                    // leak raw anyhow chains to the MCP client.
+                    e.downcast_ref::<crate::graph::pathfinding::PathfindError>()
+                        .map_or_else(
+                            || {
+                                tracing::error!("logic flow search failed: {e}");
+                                rmcp::ErrorData::internal_error("logic flow search failed", None)
+                            },
+                            |pf_err| rmcp::ErrorData::invalid_params(pf_err.to_string(), None),
+                        )
                 })?;
 
         let record = capture::ToolCallRecord {

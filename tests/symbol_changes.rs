@@ -34,7 +34,7 @@ fn indexer_populates_symbol_changes_on_reindex() {
     // Modify a file to trigger changes on re-index.
     std::fs::write(
         tmp.path().join("src/auth.ts"),
-        r#"
+        r"
 export function validateToken(token: string): boolean {
     return token.length > 0;
 }
@@ -42,7 +42,7 @@ export function validateToken(token: string): boolean {
 export function newFunction(): void {
     console.log('new');
 }
-"#,
+",
     )
     .unwrap();
 

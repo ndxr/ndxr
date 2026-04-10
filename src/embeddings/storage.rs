@@ -209,7 +209,9 @@ mod tests {
         let conn = setup_db();
         conn.execute("INSERT INTO symbols (id, fqn) VALUES (1, 'test::sym')", [])
             .unwrap();
-        let emb: Vec<f32> = (0..384).map(|i| i as f32 * 0.01).collect();
+        #[allow(clippy::cast_precision_loss)]
+        // test data; i32 → f32 precision loss irrelevant for 0..384
+        let emb: Vec<f32> = (0..384_i32).map(|i| i as f32 * 0.01).collect();
         store_embeddings(&conn, &[(1, &emb)], "test-model").unwrap();
         let loaded = load_embeddings(&conn, &[1]).unwrap();
         assert_eq!(loaded.len(), 1);

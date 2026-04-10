@@ -594,7 +594,7 @@ fn search_memories_excludes_auto_by_default() {
     save_observation(
         &conn,
         &NewObservation {
-            session_id: session_id.clone(),
+            session_id,
             kind: "insight".to_owned(),
             content: "Important insight about validateToken and JWT".to_owned(),
             headline: None,

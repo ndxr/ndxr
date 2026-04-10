@@ -428,7 +428,7 @@ fn progress_callback_receives_stage_messages() {
     let stats = ndxr::indexer::index(&config, Some(&callback)).unwrap();
     assert!(stats.files_indexed > 0);
 
-    let msgs = messages.lock().unwrap();
+    let msgs: Vec<String> = messages.lock().unwrap().clone();
     let joined = msgs.join("\n");
 
     assert!(

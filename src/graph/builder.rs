@@ -206,8 +206,9 @@ mod tests {
     fn rebuild_graph_from_db_succeeds_on_valid_db() {
         let tmp2 = TempDir::new().unwrap();
         let db_path = tmp2.path().join("test.db");
-        let _c = db::open_or_create(&db_path).unwrap();
-        drop(_c);
+        // Open the DB once to run migrations, then drop the connection so
+        // rebuild_graph_from_db can open its own read connection.
+        drop(db::open_or_create(&db_path).unwrap());
         let graph = rebuild_graph_from_db(&db_path);
         assert!(graph.is_some(), "rebuild should succeed for valid empty DB");
     }

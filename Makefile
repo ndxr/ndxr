@@ -37,11 +37,14 @@ fmt: ## Format code
 fmt-check: ## Check formatting (CI)
 	cargo fmt --check
 
-lint: ## Run clippy lints
-	cargo clippy -- -D warnings
+lint: ## Run clippy lints (pedantic + all deny, matches CLAUDE.md quality bar)
+	cargo clippy --all-targets --all-features -- \
+		-D warnings \
+		-D clippy::all \
+		-D clippy::pedantic
 
-lint-nursery: ## Run clippy nursery lints
-	cargo clippy -- -W clippy::nursery
+lint-nursery: ## Run clippy nursery lints (warn-only, advisory)
+	cargo clippy --all-targets --all-features -- -W clippy::nursery
 
 audit: ## Audit dependencies for known vulnerabilities
 	cargo audit

@@ -126,20 +126,26 @@ impl FileWatcher {
                             Ok(Some(graph)) => {
                                 let mut graph_lock = engine.graph.write().await;
                                 *graph_lock = Some(graph);
+                                drop(graph_lock);
+                                // Only recompute embeddings when re-index + graph rebuild
+                                // succeeded — otherwise the DB state is inconsistent and
+                                // embeddings would be written against stale symbol ids.
+                                if let Some(ref model) = engine.embeddings_model {
+                                    recompute_embeddings_for_paths(
+                                        &engine, model, &changed_paths, &ws_root,
+                                    ).await;
+                                }
                             }
                             Ok(None) => {
-                                tracing::warn!("watcher: graph rebuild skipped or failed");
+                                tracing::warn!(
+                                    "watcher: graph rebuild skipped or failed; skipping embedding recompute"
+                                );
                             }
                             Err(e) => {
-                                tracing::error!("watcher: spawn_blocking panicked: {e}");
+                                tracing::error!(
+                                    "watcher: spawn_blocking panicked: {e}; skipping embedding recompute"
+                                );
                             }
-                        }
-
-                        // Recompute embeddings for symbols in changed files.
-                        if let Some(ref model) = engine.embeddings_model {
-                            recompute_embeddings_for_paths(
-                                &engine, model, &changed_paths, &ws_root,
-                            ).await;
                         }
                     }
                 }

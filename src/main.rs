@@ -602,19 +602,31 @@ fn cmd_model_status() -> Result<()> {
         println!("Status: downloaded");
         println!("Path: {}", models_dir.display());
         let config = ndxr::config::NdxrConfig::from_workspace(root);
-        if let Ok(conn) = ndxr::storage::db::open_or_create(&config.db_path)
-            && let Ok(status) = ndxr::status::collect_index_status(&conn, &config.db_path)
-        {
-            let emb_count = status.embeddings_count;
-            let sym_count = status.symbol_count;
-            if sym_count > 0 {
-                #[allow(clippy::cast_precision_loss)] // counts are small
-                #[allow(clippy::cast_possible_truncation)] // percentage 0..100 fits u32
-                #[allow(clippy::cast_sign_loss)] // percentage is non-negative
-                let pct = (emb_count as f64 / sym_count as f64 * 100.0) as u32;
-                println!("Embeddings: {emb_count}/{sym_count} symbols ({pct}%)");
-            } else {
-                println!("Embeddings: 0 (no symbols indexed)");
+        match ndxr::storage::db::open_or_create(&config.db_path) {
+            Ok(conn) => match ndxr::status::collect_index_status(&conn, &config.db_path) {
+                Ok(status) => {
+                    let emb_count = status.embeddings_count;
+                    let sym_count = status.symbol_count;
+                    if sym_count > 0 {
+                        #[allow(clippy::cast_precision_loss)] // counts are small
+                        #[allow(clippy::cast_possible_truncation)] // percentage 0..100 fits u32
+                        #[allow(clippy::cast_sign_loss)]
+                        // percentage is non-negative
+                        let pct = (emb_count as f64 / sym_count as f64 * 100.0) as u32;
+                        println!("Embeddings: {emb_count}/{sym_count} symbols ({pct}%)");
+                    } else {
+                        println!("Embeddings: 0 (no symbols indexed — run 'ndxr index')");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Warning: could not read index status: {e}");
+                }
+            },
+            Err(e) => {
+                eprintln!(
+                    "Warning: could not open index database at {}: {e}",
+                    config.db_path.display()
+                );
             }
         }
     } else {
@@ -750,14 +762,18 @@ fn print_recent_activity(conn: &rusqlite::Connection, limit: usize) -> Result<()
 fn cmd_activity_follow(conn: &rusqlite::Connection, initial_limit: usize) -> Result<()> {
     print_recent_activity(conn, initial_limit)?;
 
-    let (mut last_seen_ts, mut last_seen_id): (i64, i64) = conn
-        .query_row(
-            "SELECT COALESCE(created_at, 0), COALESCE(id, 0) \
+    // Discriminate "no observations yet" (fine — tail from the beginning) from
+    // a real DB error (propagate — otherwise --follow silently re-dumps all history).
+    let (mut last_seen_ts, mut last_seen_id): (i64, i64) = match conn.query_row(
+        "SELECT COALESCE(created_at, 0), COALESCE(id, 0) \
          FROM observations ORDER BY created_at DESC, id DESC LIMIT 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap_or((0, 0));
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ) {
+        Ok(row) => row,
+        Err(rusqlite::Error::QueryReturnedNoRows) => (0, 0),
+        Err(e) => return Err(e).context("query last observation for --follow tail"),
+    };
 
     println!("\n--- watching for new activity (Ctrl+C to stop) ---\n");
 

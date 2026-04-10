@@ -12,9 +12,31 @@ use petgraph::Direction;
 use petgraph::graph::{DiGraph, NodeIndex};
 use rusqlite::Connection;
 use serde::Serialize;
+use thiserror::Error;
 
 use crate::graph::builder::SymbolGraph;
 use crate::storage::db::{BATCH_PARAM_LIMIT, build_batch_placeholders};
+
+/// Structured errors from [`find_paths`] that callers (e.g. the MCP layer)
+/// may want to distinguish from generic internal failures to return a safe
+/// error message to clients.
+#[derive(Debug, Error)]
+pub enum PathfindError {
+    /// The `from` and `to` symbols are the same.
+    #[error("source and target symbols are the same: '{0}'")]
+    SameSymbol(String),
+    /// No symbol matches the supplied FQN or short name.
+    #[error("symbol not found: '{0}'")]
+    SymbolNotFound(String),
+    /// The short name matches multiple symbols; caller must supply a FQN.
+    #[error("ambiguous symbol name '{name}': matches {count} symbols — use a fully qualified name")]
+    AmbiguousSymbol {
+        /// The ambiguous name that was looked up.
+        name: String,
+        /// Number of symbols that matched the name.
+        count: usize,
+    },
+}
 
 /// Default number of paths to return when the caller does not specify.
 const DEFAULT_MAX_PATHS: usize = 3;
@@ -99,7 +121,7 @@ pub fn find_paths(
     max_paths: Option<usize>,
 ) -> Result<LogicFlowResult> {
     if from_fqn == to_fqn {
-        bail!("source and target symbols are the same: '{from_fqn}'");
+        bail!(PathfindError::SameSymbol(from_fqn.to_owned()));
     }
 
     let k = max_paths.unwrap_or(DEFAULT_MAX_PATHS).min(MAX_PATHS);
@@ -341,11 +363,12 @@ fn resolve_symbol(conn: &Connection, fqn_or_name: &str) -> Result<i64> {
         .collect();
 
     match ids.len() {
-        0 => bail!("symbol not found: '{fqn_or_name}'"),
+        0 => bail!(PathfindError::SymbolNotFound(fqn_or_name.to_owned())),
         1 => Ok(ids[0]),
-        n => bail!(
-            "ambiguous symbol name '{fqn_or_name}': matches {n} symbols — use a fully qualified name"
-        ),
+        n => bail!(PathfindError::AmbiguousSymbol {
+            name: fqn_or_name.to_owned(),
+            count: n,
+        }),
     }
 }
 
@@ -556,30 +579,30 @@ mod tests {
     use tempfile::TempDir;
 
     fn build_test_graph() -> SymbolGraph {
-        let mut g = DiGraph::new();
-        let a = g.add_node(1_i64);
-        let b = g.add_node(2_i64);
-        let c = g.add_node(3_i64);
-        let d = g.add_node(4_i64);
-        g.add_edge(a, b, "calls".to_owned());
-        g.add_edge(b, c, "calls".to_owned());
-        g.add_edge(c, d, "calls".to_owned());
-        g.add_edge(a, c, "calls".to_owned());
+        let mut graph = DiGraph::new();
+        let node_a = graph.add_node(1_i64);
+        let node_b = graph.add_node(2_i64);
+        let node_c = graph.add_node(3_i64);
+        let node_d = graph.add_node(4_i64);
+        graph.add_edge(node_a, node_b, "calls".to_owned());
+        graph.add_edge(node_b, node_c, "calls".to_owned());
+        graph.add_edge(node_c, node_d, "calls".to_owned());
+        graph.add_edge(node_a, node_c, "calls".to_owned());
 
         let mut id_to_node = HashMap::new();
-        id_to_node.insert(1_i64, a);
-        id_to_node.insert(2_i64, b);
-        id_to_node.insert(3_i64, c);
-        id_to_node.insert(4_i64, d);
+        id_to_node.insert(1_i64, node_a);
+        id_to_node.insert(2_i64, node_b);
+        id_to_node.insert(3_i64, node_c);
+        id_to_node.insert(4_i64, node_d);
 
         let mut node_to_id = HashMap::new();
-        node_to_id.insert(a, 1_i64);
-        node_to_id.insert(b, 2_i64);
-        node_to_id.insert(c, 3_i64);
-        node_to_id.insert(d, 4_i64);
+        node_to_id.insert(node_a, 1_i64);
+        node_to_id.insert(node_b, 2_i64);
+        node_to_id.insert(node_c, 3_i64);
+        node_to_id.insert(node_d, 4_i64);
 
         SymbolGraph {
-            graph: g,
+            graph,
             id_to_node,
             node_to_id,
         }

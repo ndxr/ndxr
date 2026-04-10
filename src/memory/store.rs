@@ -143,7 +143,7 @@ pub fn get_session_observations(conn: &Connection, session_id: &str) -> Result<V
         .prepare(
             "SELECT id, session_id, kind, content, headline, detail_level, is_stale, \
              created_at, score \
-             FROM observations WHERE session_id = ?1 ORDER BY created_at DESC",
+             FROM observations WHERE session_id = ?1 ORDER BY created_at DESC, id DESC",
         )
         .context("prepare get_session_observations")?;
 

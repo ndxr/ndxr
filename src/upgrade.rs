@@ -643,10 +643,10 @@ mod tests {
             tar_bytes.extend_from_slice(content);
             // Pad to 512-byte boundary
             let padding = (512 - (content.len() % 512)) % 512;
-            tar_bytes.extend(std::iter::repeat(0u8).take(padding));
+            tar_bytes.extend(std::iter::repeat_n(0u8, padding));
         }
         // End-of-archive marker: two 512-byte zero blocks
-        tar_bytes.extend(std::iter::repeat(0u8).take(1024));
+        tar_bytes.extend(std::iter::repeat_n(0u8, 1024));
 
         let mut gz_bytes = Vec::new();
         {

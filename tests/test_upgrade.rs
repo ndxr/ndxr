@@ -26,7 +26,7 @@ fn quick_start_lists_upgrade_command() {
 /// Smoke test: `ndxr upgrade --check` hits the live GitHub API and returns
 /// a valid version comparison. Requires network access.
 #[test]
-#[ignore]
+#[ignore = "hits network — live GitHub API"]
 fn upgrade_check_returns_version_info() {
     let assert = Command::cargo_bin("ndxr")
         .unwrap()
@@ -41,7 +41,7 @@ fn upgrade_check_returns_version_info() {
 /// the live GitHub API. Verifies output format regardless of whether
 /// an update is available or not.
 #[test]
-#[ignore]
+#[ignore = "hits network — live GitHub API, runs the real CLI binary"]
 fn upgrade_check_prints_version_comparison() {
     let output = Command::cargo_bin("ndxr")
         .unwrap()
@@ -96,7 +96,8 @@ fn upgrade_check_prints_version_comparison() {
 ///
 /// Proves the entire upgrade pipeline works against a real GitHub release.
 #[test]
-#[ignore]
+#[ignore = "hits network — full GitHub release download + extract + execute pipeline"]
+#[allow(clippy::too_many_lines)] // end-to-end pipeline test — splitting obscures the linear flow
 fn end_to_end_upgrade_pipeline() {
     // Step 1: Check for updates against the real GitHub API.
     let status = ndxr::upgrade::check_for_update().unwrap();

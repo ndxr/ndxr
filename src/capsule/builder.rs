@@ -475,38 +475,37 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::many_single_char_names)]
     fn bfs_expand_respects_max_depth() {
-        let mut g = DiGraph::new();
-        let a = g.add_node(1_i64);
-        let b = g.add_node(2_i64);
-        let c = g.add_node(3_i64);
-        let d = g.add_node(4_i64);
-        g.add_edge(a, b, "calls".to_string());
-        g.add_edge(b, c, "calls".to_string());
-        g.add_edge(c, d, "calls".to_string());
+        let mut graph_build = DiGraph::new();
+        let node_a = graph_build.add_node(1_i64);
+        let node_b = graph_build.add_node(2_i64);
+        let node_c = graph_build.add_node(3_i64);
+        let node_d = graph_build.add_node(4_i64);
+        graph_build.add_edge(node_a, node_b, "calls".to_string());
+        graph_build.add_edge(node_b, node_c, "calls".to_string());
+        graph_build.add_edge(node_c, node_d, "calls".to_string());
 
         let mut id_to_node = HashMap::new();
         let mut node_to_id = HashMap::new();
-        for node in [a, b, c, d] {
-            let id = g[node];
+        for node in [node_a, node_b, node_c, node_d] {
+            let id = graph_build[node];
             id_to_node.insert(id, node);
             node_to_id.insert(node, id);
         }
 
         let graph = SymbolGraph {
-            graph: g,
+            graph: graph_build,
             id_to_node,
             node_to_id,
         };
 
-        // Depth 1 from node a: should reach b only (outgoing).
-        let result = bfs_expand(&graph, &[a], 1);
+        // Depth 1 from node_a: should reach node_b only (outgoing).
+        let result = bfs_expand(&graph, &[node_a], 1);
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].0, b);
+        assert_eq!(result[0].0, node_b);
 
-        // Depth 2 from node a: should reach b and c.
-        let result = bfs_expand(&graph, &[a], 2);
+        // Depth 2 from node_a: should reach node_b and node_c.
+        let result = bfs_expand(&graph, &[node_a], 2);
         assert_eq!(result.len(), 2);
     }
 

@@ -212,18 +212,15 @@ fn fts_candidates(conn: &Connection, query: &str, exclude_auto: bool) -> Result<
 
     let mut stmt = conn.prepare(sql).context("prepare FTS5 candidate query")?;
 
+    #[allow(clippy::cast_possible_wrap)]
+    // FTS_CANDIDATE_LIMIT is a small const, never near i64::MAX
+    let fts_limit = FTS_CANDIDATE_LIMIT as i64;
     let rows = stmt
-        .query_map(
-            params![
-                fts_query,
-                i64::try_from(FTS_CANDIDATE_LIMIT).expect("candidate limit exceeds i64")
-            ],
-            |row| {
-                let rowid: i64 = row.get(0)?;
-                let score: f64 = row.get(1)?;
-                Ok((rowid, score.abs()))
-            },
-        )
+        .query_map(params![fts_query, fts_limit], |row| {
+            let rowid: i64 = row.get(0)?;
+            let score: f64 = row.get(1)?;
+            Ok((rowid, score.abs()))
+        })
         .context("query observations_fts")?;
 
     let mut candidates = Vec::new();

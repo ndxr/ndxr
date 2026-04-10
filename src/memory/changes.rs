@@ -252,7 +252,7 @@ pub fn store_symbol_changes(
         match conn.query_row(
             "SELECT id FROM observations \
              WHERE session_id = ?1 AND kind = 'auto' AND created_at >= ?2 \
-             ORDER BY created_at DESC LIMIT 1",
+             ORDER BY created_at DESC, id DESC LIMIT 1",
             rusqlite::params![sid, window_start],
             |row| row.get(0),
         ) {

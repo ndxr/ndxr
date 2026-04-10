@@ -324,6 +324,8 @@ Every `.rs` file follows this top-to-bottom order. **Never mix sections.**
 
 User-facing, compact bullets. Describe what users can **do**, not internals. [Keep a Changelog](https://keepachangelog.com/) format.
 
+**Before labeling an entry as `Fixed`**, verify it's a regression from the previous tag: `git log <prev-tag>..HEAD -- <file>` and confirm the prior release behaved differently. Behavior from a feature introduced *in this same release cycle* belongs under `Added`, even if a later commit corrected an earlier draft of that feature.
+
 ## ndxr context engine
 
 ndxr indexes this codebase and provides you with only the relevant code for each task.

@@ -456,7 +456,9 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, MIGRATIONS.len() as i64);
+        #[allow(clippy::cast_possible_wrap)] // MIGRATIONS.len() is tiny, never near i64::MAX
+        let expected = MIGRATIONS.len() as i64;
+        assert_eq!(version, expected);
     }
 
     #[test]

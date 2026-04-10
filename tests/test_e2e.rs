@@ -3,7 +3,7 @@
 //! Unlike the unit/integration tests, these tests:
 //! - Run the actual `ndxr` binary via CLI
 //! - Create realistic multi-language projects with cross-file references
-//! - Open the SQLite database after each CLI command and verify exact state
+//! - Open the `SQLite` database after each CLI command and verify exact state
 //! - Test the full lifecycle: index → search → modify → re-index → staleness
 
 use std::fs;
@@ -19,6 +19,7 @@ use tempfile::TempDir;
 
 /// Creates a realistic TypeScript project with cross-file references, classes,
 /// functions, imports, and docstrings.
+#[allow(clippy::too_many_lines)] // fixture with 5 inline files; splitting would just hide the layout
 fn create_typescript_project(tmp: &TempDir) {
     fs::create_dir(tmp.path().join(".git")).unwrap();
     fs::create_dir_all(tmp.path().join("src/auth")).unwrap();
@@ -27,7 +28,7 @@ fn create_typescript_project(tmp: &TempDir) {
 
     fs::write(
         tmp.path().join("src/auth/token.ts"),
-        r#"
+        r"
 /** Validates JWT tokens against the signing key */
 export async function validateToken(token: string): Promise<boolean> {
     const decoded = parseJwt(token);
@@ -45,13 +46,13 @@ export interface JwtPayload {
     exp: number;
     iat: number;
 }
-"#,
+",
     )
     .unwrap();
 
     fs::write(
         tmp.path().join("src/auth/service.ts"),
-        r#"
+        r"
 import { validateToken } from './token';
 
 /** Authentication service managing user sessions */
@@ -79,13 +80,13 @@ export interface User {
     id: string;
     name: string;
 }
-"#,
+",
     )
     .unwrap();
 
     fs::write(
         tmp.path().join("src/db/connection.ts"),
-        r#"
+        r"
 /** Database connection pool manager */
 export class DatabasePool {
     private connections: Connection[] = [];
@@ -113,13 +114,13 @@ export interface Connection {
     url: string;
     active: boolean;
 }
-"#,
+",
     )
     .unwrap();
 
     fs::write(
         tmp.path().join("src/db/queries.ts"),
-        r#"
+        r"
 import { DatabasePool } from './connection';
 
 /** Executes a user lookup query */
@@ -131,13 +132,13 @@ export async function findUserById(pool: DatabasePool, id: string): Promise<any>
         pool.release(conn);
     }
 }
-"#,
+",
     )
     .unwrap();
 
     fs::write(
         tmp.path().join("src/api/routes.ts"),
-        r#"
+        r"
 import { AuthService } from '../auth/service';
 import { findUserById } from '../db/queries';
 import { DatabasePool } from '../db/connection';
@@ -157,7 +158,7 @@ export interface Route {
     path: string;
     handler: (req: any) => Promise<any>;
 }
-"#,
+",
     )
     .unwrap();
 }
@@ -169,7 +170,7 @@ fn create_multilang_project(tmp: &TempDir) {
 
     fs::write(
         tmp.path().join("src/main.ts"),
-        r#"
+        r"
 /** Entry point for the application */
 export function main(): void {
     const config = loadConfig();
@@ -188,7 +189,7 @@ interface Config {
     port: number;
     host: string;
 }
-"#,
+",
     )
     .unwrap();
 
@@ -220,7 +221,7 @@ def create_handler(config: dict) -> RequestHandler:
 
     fs::write(
         tmp.path().join("src/lib.rs"),
-        r#"
+        r"
 /// Configuration for the service.
 pub struct ServiceConfig {
     pub port: u16,
@@ -239,13 +240,13 @@ pub fn new_config(port: u16, host: &str) -> ServiceConfig {
 pub fn validate_config(config: &ServiceConfig) -> bool {
     config.port > 0 && !config.host.is_empty()
 }
-"#,
+",
     )
     .unwrap();
 
     fs::write(
         tmp.path().join("src/server.go"),
-        r#"
+        r"
 package main
 
 // Server represents the HTTP server.
@@ -268,7 +269,7 @@ func (s *Server) Start() error {
 func (s *Server) Stop() error {
 	return nil
 }
-"#,
+",
     )
     .unwrap();
 }
@@ -1098,7 +1099,7 @@ fn e2e_full_lifecycle_with_staleness_detection() {
     // 3. Modify the file containing validateToken (change signature).
     fs::write(
         tmp.path().join("src/auth/token.ts"),
-        r#"
+        r"
 /** Validates JWT tokens with enhanced security */
 export async function validateToken(token: string, secret: string): Promise<boolean> {
     const decoded = parseJwt(token);
@@ -1116,7 +1117,7 @@ export interface JwtPayload {
     iat: number;
     iss: string;
 }
-"#,
+",
     )
     .unwrap();
 
@@ -1306,8 +1307,7 @@ fn e2e_memory_search_persists_score_to_db() {
     );
     assert!(
         score_after.unwrap() > 0.0,
-        "persisted score should be positive, got {:?}",
-        score_after
+        "persisted score should be positive, got {score_after:?}"
     );
 
     // Persisted score should match the search result score.

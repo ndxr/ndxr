@@ -38,13 +38,12 @@ pub struct ModelHandle {
     tokenizer: Arc<tokenizers::Tokenizer>,
 }
 
-// Compile-time assertion that `ModelHandle` is `Send + Sync`.
-#[allow(dead_code)] // compile-time check only, never called at runtime
+// Compile-time assertion that `ModelHandle` is `Send + Sync`. The const fn is
+// invoked directly inside the const block so the compiler type-checks the bound
+// without the surrounding helper becoming dead code.
 const _: () = {
     const fn assert_send_sync<T: Send + Sync>() {}
-    const fn check() {
-        assert_send_sync::<ModelHandle>();
-    }
+    assert_send_sync::<ModelHandle>();
 };
 
 impl ModelHandle {
@@ -118,10 +117,7 @@ impl ModelHandle {
         let token_count = raw_ids.len().min(MAX_TOKEN_LENGTH);
 
         for i in 0..token_count {
-            #[allow(clippy::cast_lossless)] // u32 -> i64 is always lossless
-            {
-                input_ids[i] = raw_ids[i] as i64;
-            }
+            input_ids[i] = i64::from(raw_ids[i]);
             attention_mask[i] = 1;
         }
 

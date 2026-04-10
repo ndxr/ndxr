@@ -1,4 +1,4 @@
-//! Integration tests for search_logic_flow pathfinding.
+//! Integration tests for the `search_logic_flow` pathfinding.
 
 mod helpers;
 
