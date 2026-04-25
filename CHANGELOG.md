@@ -5,6 +5,17 @@ All notable changes to ndxr will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-04-25
+
+### Security
+
+- Patched five Dependabot alerts by refreshing transitive TLS dependencies — `rustls-webpki` 0.103.13 (high-severity DoS via malformed CRL) and `rand` 0.8.6 / 0.9.4 (custom-logger soundness)
+
+### Improved
+
+- Pinned the toolchain to Rust 1.95 (via `rust-toolchain.toml` and `rust-version = "1.95"`) so local and CI builds use the same compiler
+- Refreshed compatible dependencies, including `rmcp` 1.5, `rustls` 0.23.39, `tokio` 1.52, `rayon` 1.12, and several tree-sitter grammars
+
 ## [0.8.0] - 2026-04-10
 
 ### Added

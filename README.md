@@ -5,7 +5,7 @@
 <p align="center">Local-first context engine for AI coding agents, optimized for Claude Code.</p>
 
 <p align="center">
-  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/Rust-1.94-orange.svg?logo=rust" alt="Rust"></a>
+  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/Rust-1.95-orange.svg?logo=rust" alt="Rust"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License"></a>
   <a href="https://github.com/ndxr/ndxr/actions/workflows/ci.yml"><img src="https://github.com/ndxr/ndxr/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
 </p>
@@ -216,7 +216,7 @@ make build-release
 make install
 ```
 
-Requires Rust 1.94 (edition 2024).
+Requires Rust 1.95 (edition 2024).
 
 Run `make help` for all available targets (build, test, lint, cross-compilation).
 

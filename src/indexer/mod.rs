@@ -631,7 +631,7 @@ fn compute_embeddings(
         }
         let texts: Vec<&str> = chunk.iter().map(|(_, t)| t.as_str()).collect();
         let embeddings = model.embed_batch(&texts)?;
-        for ((id, _), emb) in chunk.iter().zip(embeddings.into_iter()) {
+        for ((id, _), emb) in chunk.iter().zip(embeddings) {
             all_entries.push((*id, emb));
         }
     }

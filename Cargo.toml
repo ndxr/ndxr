@@ -1,7 +1,8 @@
 [package]
 name = "ndxr"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2024"
+rust-version = "1.95"
 license = "Apache-2.0"
 description = "Local-first context engine for AI coding agents"
 

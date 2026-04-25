@@ -774,10 +774,8 @@ fn has_modifier_keyword(node: Node<'_>, keyword: &str) -> bool {
 /// Returns `true` if the node is at the top level (direct child of the root or
 /// program node).
 fn is_top_level(node: Node<'_>) -> bool {
-    node.parent().is_none()
-        || node
-            .parent()
-            .is_some_and(|p| matches!(p.kind(), "program" | "source_file" | "translation_unit"))
+    node.parent()
+        .is_none_or(|p| matches!(p.kind(), "program" | "source_file" | "translation_unit"))
 }
 
 /// Cleans an import name by stripping quotes and path prefixes.

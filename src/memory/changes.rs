@@ -353,7 +353,7 @@ pub fn query_recent_changes(
     }
 
     // Sort all collected changes by detected_at DESC and truncate.
-    all_changes.sort_by(|a, b| b.detected_at.cmp(&a.detected_at));
+    all_changes.sort_by_key(|c| std::cmp::Reverse(c.detected_at));
     all_changes.truncate(limit);
     Ok(all_changes)
 }
